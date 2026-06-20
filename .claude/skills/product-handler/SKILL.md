@@ -1,86 +1,104 @@
 # Product Handler Skill
 
-Guides the Telegram bot's product display, stock checking, and order-type routing logic.
+Guides the Telegram bot's catalog display, live stock checking, ordering,
+payslip handling, and admin-verified delivery for the Going Forward Digital Shop.
 
-## Product Menu Formatting
+## Data model — four tabs, joined by IDs
 
-When building the product menu for a user:
+The Google Sheet has four tabs. **Never match products by display name** — the
+join keys are **Product ID** (`P001`) and **Order ID** (`ORD-0001`), and they
+appear in every button's `callback_data`.
 
-1. **Fetch live data** — always call `sheets.getProducts()` at display time, never cache.
-2. **Group by type** — split into two sections:
-   - 📦 **Ready-Made Accounts** (`type: "ready"`)
-   - 📧 **Email-Based Activation** (`type: "email"`)
-3. **Filter out-of-stock** — only show products where `stock > 0`. If a section is empty, omit its header entirely.
-4. **Each entry** shows: `• {name} — {price} Ks`
-5. **Inline keyboard** — one button per product, callback_data = `buy_{name}` (keep name short; Telegram limits callback_data to 64 bytes).
+- **Products** — catalog only: `Product ID | Product Name | Variant | Type
+  (ready/email) | Price (MMK) | Description | Active`. No stock, no credentials.
+- **Inventory** — one row per real account: `Inventory ID | Product ID | Account
+  Credentials | Status (Available/Sold) | Sold To (Username) | Sold Date/Time |
+  Order ID`.
+- **Orders** — one row per order: `Order ID | Date Created | Customer Username |
+  Customer Chat ID | Product ID | Product Name | Variant | Price (MMK) | Payment
+  Status | Payslip Sent | Admin Decision | Decision Time | Delivery Status |
+  Inventory ID Used | Credentials Sent | Used Date/Time | Notes`.
+- **Settings** — `Key | Value | Notes`. Read **all** payment/admin values live at
+  runtime (bank number/name, accepted methods, payment note, delivery promise,
+  urgent phone, Admin Telegram Username, Admin Contact Phone). Never hardcode them.
 
-Example message structure:
-```
-🛒 *Going Forward Digital Shop*
+### Live stock count (never stored)
 
-📦 *Ready-Made Accounts*
-• ChatGPT Plus — 15000 Ks
-• Netflix Premium — 8000 Ks
+Stock for a ready product = the number of **Inventory** rows where `Product ID`
+matches **and** `Status = "Available"`. Compute it live with
+`sheets.countAvailableStock(productId)` every time a detail card is shown or a
+purchase is attempted. There is no stock column anywhere.
 
-📧 *Email-Based Activation*
-• Spotify Family — 5000 Ks
+Email products have no inventory and no stock number — they are always buyable.
 
-Tap a product below to order:
-```
+## Menu flow
 
-## Stock Availability Check
+1. **Main menu** (`/start` or the text "Products"): one button per **unique
+   Product Name** (variants grouped under the same name). Each button's
+   `callback_data` is `name:<firstProductId>` of that group — an ID, not a name.
+2. **Name tapped** -> if the name has more than one variant, show one button per
+   variant (`detail:<productId>`, label `"{Variant} — {Price} MMK"`). If only one
+   variant exists, skip straight to the detail card.
+3. **Detail card** (`detail:<productId>`): show Product Name, Variant, Price,
+   Description. For **ready** products add `In stock: N` (live count). If
+   `N = 0`, show `Sold Out` with only **Back** and **Main menu** (no Buy now).
+   **email** products show no stock line and always show **Buy now**. Buttons when
+   buyable: `Buy now` (`buy:<productId>`), `Back`, `Main menu`.
 
-Before processing any order:
+## Buy -> payslip -> verify -> deliver
 
-1. Re-fetch products from the sheet (don't trust stale data from the menu render).
-2. Find the exact product by name.
-3. If the product's stock is `"-"` in the sheet → it's unlimited (email products), always available.
-4. If `product.stock <= 0` (numeric) → reply with: `❌ Sorry, "{name}" is out of stock.`
-5. If the product is gone entirely → reply with: `❌ Product not found.`
+4. **Buy now** (`buy:<productId>`): re-check live stock for ready products. Create
+   an **Orders** row via `sheets.createOrder(...)` — auto Order ID `ORD-####`,
+   Date Created now, customer username + chat id, Product ID/Name/Variant/Price,
+   Payment Status `Awaiting Payslip`, Payslip Sent `No`, Admin Decision `Pending`,
+   Delivery Status `Not Delivered`. Track `Map<chatId, orderId>` so the next photo
+   is tied to this order. Send Settings-driven payment instructions with buttons
+   `Cancel Buy` (`cancel:<orderId>`) and `Main Menu`.
+5. **Cancel Buy** (`cancel:<orderId>`): set Payment Status `Cancelled`, clear the
+   pending-payslip entry, return to the main menu.
+6. **Customer sends a photo** while their order is `Awaiting Payslip`: set Payslip
+   Sent `Yes`, Payment Status `Payslip Received`; forward the photo to the **Admin
+   Telegram Username** (by resolved admin chat id) with a caption (Order ID,
+   Product Name, Variant, Price, customer username) and `Verified` /
+   `No Verify` buttons (`verify:<orderId>` / `noverify:<orderId>`); reply to the
+   customer "Payment received, waiting for admin verification."
+   - **Manual setup:** the admin must send `/start` to the bot once so the bot can
+     message them. The bot captures the admin's chat id on that `/start` (matching
+     their @username to the Settings value) and persists it as `Admin Chat ID`.
+7. **Admin -> Verified** (`verify:<orderId>`, admin chat only): set Admin Decision
+   `Verified`, Decision Time now.
+   - **ready:** take the FIRST Inventory row with this Product ID and Status
+     `Available`. If none, tell the admin it's sold out and stop. Otherwise send
+     its Account Credentials to the customer; mark that Inventory row `Sold`, Sold
+     To = customer username, Sold Date/Time now, Order ID = this order; and set the
+     Order's Inventory ID Used, Credentials Sent (copy of the text), Used Date/Time
+     now, Delivery Status `Delivered`.
+   - **email:** send the customer a confirmation with one button `Contact Admin
+     to Continue` (`continue:<orderId>`); set Delivery Status `Awaiting Admin
+     Contact`.
+   - Either way, edit the admin's payslip message to append `Verified` and remove
+     its buttons so it can't be tapped twice.
+8. **Admin -> No Verify** (`noverify:<orderId>`): set Admin Decision `No Verify`,
+   Decision Time now, Payment Status `Not Verified`; send the customer a message
+   with `Main` and `Contact Admin` (`contact:<orderId>`); edit the admin
+   message to `No Verify` and remove buttons.
+9. **Customer -> Contact Admin** (`contact:<orderId>`, after No Verify): show Admin
+   Contact Phone and Admin Telegram Username from Settings.
+10. **Customer -> Contact Admin to Continue** (`continue:<orderId>`, after a Verified
+    email order): message the **admin** with the order's Product Name, Variant,
+    Price, customer username + chat id; then show the customer the Admin Contact
+    Phone and Telegram Username.
 
-**Why re-fetch?** Stock changes between when the user sees the menu and when they tap. Another user may have bought the last one.
+## Helper functions (`sheets.js`)
 
-**Why "-" for email products?** These are activated on the customer's own account — no physical inventory to track. The sheet uses `"-"` to mean "skip stock logic".
+`getSettings`, `setSetting`, `getProducts`, `getProductById`,
+`countAvailableStock`, `getAvailableInventory`, `markInventorySold`,
+`createOrder`, `getOrderByOrderId`, `updateOrderByOrderId`, `now`.
 
-## Handling "ready" Products (type: "ready")
+## Error handling
 
-These are pre-made accounts. The flow is **immediate** — no extra input from the customer.
-
-Steps:
-1. Validate stock (see above).
-2. Call `sheets.decreaseStock(productName)` to decrement stock by 1.
-3. Call `sheets.logOrder({ customerId, product: productName, email: "" })` — email field is blank.
-4. Format `customerId` as `@{username}` if available, otherwise `{firstName} (id:{telegramId})`.
-5. Reply with confirmation:
-   ```
-   ✅ *Order Confirmed!*
-
-   📦 Product: {name}
-   💰 Price: {price} Ks
-
-   Your order is being processed. You'll receive your account details shortly.
-   ```
-
-## Handling "email" Products (type: "email")
-
-These require the customer's email for activation. The flow is **two-step**.
-
-Steps:
-1. Validate stock (see above).
-2. Set the user's state to "awaiting email" (store in a `Map<chatId, { productName }>`).
-3. Prompt: `📧 You selected *{name}* ({price} Ks).\n\nPlease type the email address linked to your account:`
-4. When the user sends a plain text message and they are in the awaiting state:
-   a. Validate it looks like an email (`/^[^\s@]+@[^\s@]+\.[^\s@]+$/`).
-   b. If invalid → `⚠️ That doesn't look like a valid email. Please try again:` and keep waiting.
-   c. If valid → clear their awaiting state, then:
-      - Re-validate stock (it may have changed).
-      - `decreaseStock` + `logOrder` (this time with the email).
-      - Reply with confirmation including the email.
-
-**Important:** The awaiting-email state must be cleaned up on successful order, on `/start` (optional reset), or if the user sends a command instead. Don't leave stale entries.
-
-## Error Handling
-
-- All Google Sheets calls should be wrapped in try/catch.
-- On sheet errors, reply with: `⚠️ Failed to load products. Please try again.` (for reads) or `⚠️ Something went wrong. Please try again.` (for writes).
-- Log the full error to console for debugging.
+- Wrap all Sheets calls in try/catch; log the full error to console with context.
+- On failure reply: `Failed to load products. Please try again.` (reads) or
+  `Something went wrong. Please try again.` (writes).
+- Guard admin actions: ignore `verify`/`noverify` from non-admin chats, and skip
+  any order whose Admin Decision is no longer `Pending` (prevents double delivery).

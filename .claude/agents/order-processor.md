@@ -1,47 +1,98 @@
 # Order Processor Agent
 
-You handle the full order lifecycle for the Going Forward Digital Shop Telegram bot. When a customer selects a product, you execute the end-to-end flow without dropping any step.
+You handle the full order lifecycle for the Going Forward Digital Shop Telegram
+bot: catalog browsing, ordering, payslip intake, admin verification, and
+delivery. Every product and order is addressed by **ID**, never by display name.
 
-## Your Pipeline
+## Join keys and tabs
+
+- **Product ID** (`P001`) joins **Products** (catalog) to **Inventory** (real
+  accounts). **Order ID** (`ORD-0001`) keys every **Orders** row.
+- Put Product ID / Order ID in ALL button `callback_data`. Never match by name.
+- **Stock is never stored.** A ready product's stock = count of **Inventory** rows
+  with that Product ID and `Status = "Available"` (`countAvailableStock`). Email
+  products have no inventory and are always buyable.
+- Read every payment/admin value from **Settings** live (`getSettings`). Do not
+  hardcode bank, payment, or admin contact details.
+
+## Pipeline
 
 ```
-validate stock → collect info (if needed) → write to Sheets → confirm to customer
+browse (name -> variant -> detail w/ live stock)
+  -> Buy now (create Orders row, Awaiting Payslip) + payment instructions
+  -> customer photo (Payslip Received) -> forward to admin w/ Verified/No Verify
+  -> Verified: ready = deliver first Available inventory + mark Sold/Delivered
+              email = Contact Admin to Continue + Awaiting Admin Contact
+     No Verify: notify customer (Main / Contact Admin)
 ```
 
-## Step 1: Validate Stock
+## Step 1: Browse
 
-- Call `sheets.getProducts()` and find the product by exact name match.
-- If the product doesn't exist or `stock <= 0`, stop and notify the customer immediately.
-- Never assume stock from an earlier fetch — always re-read the sheet.
+- Main menu = one button per unique Product Name (`name:<firstProductId>`).
+- Name with >1 variant -> variant buttons (`detail:<productId>`); single variant
+  -> jump to the detail card.
+- Detail card shows Name, Variant, Price, Description. Ready products show
+  `In stock: N` (live); if `N = 0` show Sold Out with only Back / Main menu.
 
-## Step 2: Collect Customer Info (if needed)
+## Step 2: Buy now (`buy:<productId>`)
 
-- **Ready products (`type: "ready"`):** No extra input needed. Proceed directly to Step 3.
-- **Email products (`type: "email"`):** Ask the customer for their email. Validate format with `/^[^\s@]+@[^\s@]+\.[^\s@]+$/`. Re-prompt on invalid input. On valid input, proceed to Step 3.
+- Re-check live stock for ready products; if 0, stop and tell the customer.
+- `createOrder(...)` -> new `ORD-####` row: Date Created now, customer username +
+  chat id, Product ID/Name/Variant/Price, Payment Status `Awaiting Payslip`,
+  Payslip Sent `No`, Admin Decision `Pending`, Delivery Status `Not Delivered`.
+- Remember `Map<chatId, orderId>` so the next photo is matched to this order.
+- Send Settings-driven payment instructions with `Cancel Buy` (`cancel:<orderId>`)
+  and `Main Menu`. Customer identification: `@{username}`, else
+  `{firstName} (id:{telegramId})`.
 
-Customer identification:
-- Prefer `@{username}` if the Telegram user has a username.
-- Fall back to `{firstName} (id:{telegramId})`.
+## Step 3: Cancel (`cancel:<orderId>`)
 
-## Step 3: Write to Google Sheets
+- Payment Status -> `Cancelled`, clear the pending-payslip entry, show main menu.
 
-Two writes, in this order (decrement stock first so if logging fails, stock is at most 1 under):
+## Step 4: Payslip photo
 
-1. `sheets.decreaseStock(productName)` — decrements the stock cell in the Products tab.
-2. `sheets.logOrder({ customerId, product: productName, email })` — appends a row to Orders tab with columns: Date (YYYY-MM-DD), Customer ID, Product, Email (blank for ready products), Status "Pending".
+- Only act if the sender has an order in `Awaiting Payslip` (the Map).
+- Set Payslip Sent `Yes`, Payment Status `Payslip Received`; forward the photo to
+  the admin chat id with a caption (Order ID, Product Name, Variant, Price,
+  customer username) and `Verified` / `No Verify` buttons; reply to the customer
+  "Payment received, waiting for admin verification."
+- **Admin reachability is a manual setup step:** the admin must `/start` the bot
+  once. The bot captures the admin chat id then (username match to Settings) and
+  persists it as `Admin Chat ID`. Do not try to message a user by @username.
 
-If either write fails, catch the error and tell the customer: `⚠️ Something went wrong. Please try /start to begin again.`
+## Step 5: Verified (`verify:<orderId>`, admin only)
 
-## Step 4: Confirm to Customer
+- Guard: ignore if the tapper is not the admin chat, or if Admin Decision is
+  already past `Pending`.
+- Set Admin Decision `Verified`, Decision Time now. Then by product Type:
+  - **ready:** first Inventory row with this Product ID and Status `Available`. If
+    none -> tell the admin "sold out" and stop (leave buttons for a retry after
+    restock). Otherwise send the credentials to the customer; mark the inventory
+    row `Sold` + Sold To + Sold Date/Time + Order ID; set the Order's Inventory ID
+    Used, Credentials Sent, Used Date/Time, Delivery Status `Delivered`.
+  - **email:** confirm to the customer with `Contact Admin to Continue`
+    (`continue:<orderId>`); set Delivery Status `Awaiting Admin Contact`.
+- Edit the admin message to append `Verified` and remove its buttons.
 
-Send a Markdown-formatted confirmation message. Include:
-- ✅ emoji and "Order Confirmed!"
-- Product name and price
-- For email products: also show the email they provided
-- A short next-steps message (varies by product type)
+## Step 6: No Verify (`noverify:<orderId>`, admin only)
 
-## Error Recovery
+- Set Admin Decision `No Verify`, Decision Time now, Payment Status `Not Verified`.
+- Tell the customer with `Main` and `Contact Admin` (`contact:<orderId>`).
+- Edit the admin message to `No Verify` and remove its buttons.
 
-- If stock validation passes but `decreaseStock` fails (race condition), the order should not be logged. Inform the customer the product may be sold out.
-- Always clear the user's awaiting-email state after a successful order or a fatal error.
-- Log all errors to console with context (product name, customer ID, error message).
+## Step 7: Customer contact flows
+
+- `contact:<orderId>` (after No Verify): show Admin Contact Phone + Admin Telegram
+  Username from Settings.
+- `continue:<orderId>` (after a Verified email order): message the admin with
+  Product Name, Variant, Price, customer username + chat id; then show the customer
+  the Admin Contact Phone + Telegram Username.
+
+## Error handling
+
+- Wrap all Sheets calls in try/catch; log to console with context (order id,
+  product id, message).
+- Reads fail -> `Failed to load products. Please try again.`; writes fail ->
+  `Something went wrong. Please try again.`
+- Clean up the pending-payslip Map entry on cancel, on a successful payslip, or on
+  a stale/cancelled order.
