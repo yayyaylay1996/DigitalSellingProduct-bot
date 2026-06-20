@@ -1,2 +1,8 @@
 .env
 node_modules/
+google-credentials.json
+# extra service-account key (secret)
+digital-shop-bot-*.json
+# local spreadsheet copy (contains plaintext account credentials)
+DigitalShop_Full_System.xlsx
+.DS_Store

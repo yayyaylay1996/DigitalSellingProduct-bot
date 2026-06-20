@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "A Telegram bot for selling digital products and managing orders automatically.",
   "main": "index.js",
-  "type": "commonjs",
+  "type": "module",
   "scripts": {
     "start": "node index.js",
     "test": "echo \"Error: no test specified\" && exit 1"

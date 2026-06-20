@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "google-sheets": {
+      "command": "npx",
+      "args": [
+        "@anthropic/mcp-server-google-sheets",
+        "--credentials-file=./google-credentials.json",
+        "--spreadsheet-id=1DU7CqxBN4OB_AoTOXEUcy0XfTVakrJzX8dwhU9uwrxk"
+      ]
+    }
+  }
+}
