@@ -1,54 +1,57 @@
----
-marp: true
-paginate: true
-theme: default
----
-
-<!--
-ch-4 Product-Intro Deck — Going Forward Digital Shop Bot
-yayyaylay1996 · vibecode.tours · cohort-1
--->
-
-<!-- Slide 1 -->
 # Going Forward Digital Shop Bot
 
-A Telegram bot that runs a real digital-subscription reselling business.
+## Overview
+A Telegram bot for digital product selling and inventory management. Enables businesses to showcase products, process orders, and manage customer interactions—all within Telegram.
 
-**yayyaylay1996** · vibecode.tours · cohort-1
+## Key Features
 
----
+### 📦 Product Management
+- Browse product catalog directly in Telegram
+- View product details, prices, and availability
+- Category-based product filtering
 
-<!-- Slide 2 -->
-## What it is
+### 🛒 Shopping & Ordering
+- Simple add-to-cart functionality
+- Automated order processing
+- Order confirmation and tracking
 
-A Telegram bot for selling digital subscriptions — Netflix, Capcut, ChatGPT,
-Spotify, VPN, and more — with live stock, self-serve browsing, and
-admin-verified payments. No server, no database: Google Sheets is the backend.
+### 💬 Customer Support
+- Direct messaging with shop administrators
+- Quick response to customer inquiries
+- FAQ and help commands
 
----
+### 📊 Business Tools
+- Sales tracking and analytics
+- Inventory management
+- Customer feedback collection
 
-<!-- Slide 3 -->
-## Who it's for
+## Tech Stack
+- **Platform**: Telegram Bot API
+- **Backend**: Node.js / Python
+- **Database**: Cloud storage for product & order data
+- **Deployment**: Cloud hosting with auto-scaling
 
-- Sellers who currently resell subscriptions **by hand** over Telegram DMs
-- Customers who want to see price + stock instantly instead of waiting on a
-  seller's reply
+## How It Works
+1. Users search for `@GoingForwardDigitalShopBot` on Telegram
+2. Start the bot and browse available products
+3. Add items to cart and checkout
+4. Receive order confirmation and status updates
+5. Communicate with shop owners for support
 
----
+## Live Demo
+**Bot Handle**: [@GoingForwardDigitalShopBot](https://t.me/GoingForwardDigitalShopBot)
 
-<!-- Slide 4 -->
-## What it does
+**URL**: https://t.me/GoingForwardDigitalShopBot
 
-1. Customer browses products, sees **live stock** and price
-2. Taps **Buy now**, gets payment details, sends a payslip screenshot
-3. Admin taps **Verified** with one button
-4. Bot **auto-delivers** the account (or hands off to the admin for manual
-   setup) and marks it sold
+## Project Impact
+- Simplified digital product distribution
+- Reduced friction in checkout process
+- Enabled small businesses to sell via Telegram
+- Improved customer engagement through conversational commerce
 
----
-
-<!-- Slide 5 -->
-## Try it
-
-- Telegram: [t.me/GoingForwardDigitalShopBot](https://t.me/GoingForwardDigitalShopBot)
-- Repo: https://github.com/yayyaylay1996/DigitalSellingProduct-bot
+## Screenshots
+See repository for live screenshots of:
+- Product catalog interface
+- Shopping cart and checkout flow
+- Order management dashboard
+- Customer interaction examples
