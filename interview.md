@@ -1,4 +1,4 @@
-# User Interview — Going Forward Digital Shop Bot
+User Interview — Going Forward Digital Shop Bot
 
 **ch-5 · one real user · short user interview**
 
@@ -8,13 +8,13 @@
 * **Relationship to the product:** friend testing the bot
 * **Date:** 10 July 2026
 
-## Questions and Answers
+Questions and Answers
 
-### 1. Telegram ကနေ seller ဆီက subscription ဝယ်ဖူးတဲ့ နောက်ဆုံးအကြိမ်အကြောင်း ပြောပြပေးပါ။ ဘာတွေ အဆင်မပြေဖြစ်ခဲ့လဲ?
+1. Telegram ကနေ seller ဆီက subscription ဝယ်ဖူးတဲ့ နောက်ဆုံးအကြိမ်အကြောင်း ပြောပြပေးပါ။ ဘာတွေ အဆင်မပြေဖြစ်ခဲ့လဲ?
 
 နောက်ဆုံးတစ်ခါ digital subscription ဝယ်တုန်းက seller ကို တိုက်ရိုက် message ပို့ပြီး reply ပြန်လာတာကို စောင့်ရပါတယ်။ ကိုယ်လိုချင်တဲ့ plan ကို ပြောပြီးသားဖြစ်ပေမယ့် seller က ထပ်မေးတာတွေရှိခဲ့ပါတယ်။ ဈေးနှုန်း၊ payment လုပ်နည်းနဲ့ account ရမယ့်အချိန်တွေကိုလည်း တစ်ခုချင်းစီ မေးနေရပါတယ်။ အဆင်မပြေဆုံးအချက်က seller online ဖြစ်မဖြစ်နဲ့ payment ပြီးရင် ဘယ်အချိန် account ရမလဲဆိုတာ မသိရတာပါ။
 
-### 2. 1 ကနေ 5 အထိ အမှတ်ပေးရမယ်ဆိုရင် seller ကို တိုက်ရိုက် message ပို့တာထက် ဒီ bot ကနေ ဝယ်ဖို့ ဘယ်လောက်အထိ စိတ်ဝင်စားပါသလဲ? ဘာကြောင့်လဲ?
+2. 1 ကနေ 5 အထိ အမှတ်ပေးရမယ်ဆိုရင် seller ကို တိုက်ရိုက် message ပို့တာထက် ဒီ bot ကနေ ဝယ်ဖို့ ဘယ်လောက်အထိ စိတ်ဝင်စားပါသလဲ? ဘာကြောင့်လဲ?
 
 **Rating: 4 out of 5**
 
