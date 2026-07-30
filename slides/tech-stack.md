@@ -22,7 +22,7 @@ Repo: https://github.com/yayyaylay1996/DigitalSellingProduct-bot
 <!-- Slide 2 -->
 ## 🧱 Stack
 
-- **Runtime:** Node.js (`type: module`), `node-telegram-bot-api`
+- **Runtime:** Node.js (type: module), node-telegram-bot-api
 - **Database:** Google Sheets (`googleapis`) — no server, no separate DB
 - **Storefront:** Telegram Mini App (`webapp/`), static logo grid, reads a
   published Products CSV
@@ -35,7 +35,7 @@ Repo: https://github.com/yayyaylay1996/DigitalSellingProduct-bot
 <!-- Slide 3 -->
 ## 🤖 Agents
 
-**Subagent:** `.claude/agents/order-processor.md`
+**Subagent:** .claude/agents/order-processor.md
 
 Owns the full order lifecycle end to end:
 
@@ -51,7 +51,7 @@ display name, so renaming a product never breaks past orders.
 <!-- Slide 4 -->
 ## 🧩 Skills
 
-**Skill:** `.claude/skills/product-handler/SKILL.md`
+**Skill:** .claude/skills/product-handler/SKILL.md
 
 Encodes the catalog rules Claude applies whenever menu/stock logic changes:
 
@@ -79,8 +79,8 @@ Encodes the catalog rules Claude applies whenever menu/stock logic changes:
 <!-- Slide 6 -->
 ## ⚡ Trigger
 
-- Skill and Subagent **auto-load** from `.claude/skills/` and
-  `.claude/agents/` — no manual invocation
+- Skill and Subagent **auto-load** from .claude/skills/ and
+  .claude/agents/ — no manual invocation
 - Skill fires on catalog / menu / stock work
 - Subagent fires on order-lifecycle work (buy → payslip → verify → deliver)
 - MCP server (`.mcp.json`) auto-connects when Claude Code starts in this repo
@@ -97,5 +97,5 @@ npm start                 # run the bot
 node set-menu-button.mjs  # wire the Mini App Shop button
 ```
 
-Claude Code: `claude` in the repo root — MCP, Skill, and Agent load
+Claude Code: claude in the repo root — MCP, Skill, and Agent load
 automatically.
