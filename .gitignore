@@ -7,3 +7,7 @@ digital-shop-bot-*.json
 DigitalShop_Full_System.xlsx
 .DS_Store
 DigitalShop_Import_Ready.xlsx
+
+# stray local files
+testfile.tmp
+photo_*.jpeg

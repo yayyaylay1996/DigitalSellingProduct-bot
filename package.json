@@ -5,6 +5,9 @@
   "description": "A Telegram bot for selling digital products and managing orders automatically.",
   "main": "index.js",
   "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "scripts": {
     "start": "node index.js",
     "test": "echo \"Error: no test specified\" && exit 1"

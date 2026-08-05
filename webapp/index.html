@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="my">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>Going Forward Digital Shop</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #ffffff);
+    --text: var(--tg-theme-text-color, #111111);
+    --hint: var(--tg-theme-hint-color, #8a8a8a);
+    --card: var(--tg-theme-secondary-bg-color, #f3f4f6);
+    --accent: var(--tg-theme-button-color, #2ea6ff);
+    --accent-text: var(--tg-theme-button-text-color, #ffffff);
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, "Segoe UI", Roboto, "Noto Sans Myanmar", sans-serif;
+    padding: 12px 12px 32px;
+  }
+  h1 { font-size: 18px; margin: 6px 4px 14px; }
+  .cat { font-size: 15px; font-weight: 700; margin: 18px 4px 10px; display: flex; align-items: center; gap: 6px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .card {
+    background: var(--card); border-radius: 14px; padding: 12px; cursor: pointer;
+    display: flex; flex-direction: column; align-items: center; text-align: center;
+    transition: transform .05s ease; border: 1px solid rgba(0,0,0,0.05);
+  }
+  .card:active { transform: scale(.97); }
+  .logo {
+    width: 56px; height: 56px; border-radius: 14px; object-fit: cover;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 30px; background: var(--bg); margin-bottom: 8px;
+  }
+  .name { font-size: 13px; font-weight: 600; line-height: 1.25; }
+  .price { font-size: 12px; color: var(--hint); margin-top: 3px; }
+  .badge { font-size: 10px; color: var(--accent); font-weight: 700; margin-top: 2px; }
+  .msg { color: var(--hint); text-align: center; margin-top: 40px; font-size: 14px; }
+</style>
+</head>
+<body>
+<h1>🛒 Going Forward Digital Shop</h1>
+<div id="root"><div class="msg">Loading…</div></div>
+
+<script>
+/* ─── CONFIG — fill these two in ─────────────────────────────────────────────
+   1. BOT_USERNAME: your bot's @username WITHOUT the @  (e.g. "GoingForwardShopBot")
+   2. SHEET_CSV_URL: File ▸ Share ▸ Publish to web ▸ (Products tab, CSV) link.  */
+const BOT_USERNAME = "@GoingForwardDigitalShopBot";
+const SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQ5odDFZjJuTWox4sHDK20lumu4z27alcnEWevV0cZLd7pP4TkqMO0SjBf9JyL-oaGNdXVNGa7Gpzzj/pubhtml?gid=669362890&single=true";
+const LOGO_BASE = "logos/"; // folder next to this file; used when Logo is a bare filename
+/* ─────────────────────────────────────────────────────────────────────────── */
+
+const tg = window.Telegram ? window.Telegram.WebApp : null;
+if (tg) { tg.ready(); tg.expand(); }
+
+// Be forgiving about the two config values:
+// - strip a leading "@" from the bot username
+// - accept a "pubhtml" link and turn it into a real CSV link
+const BOT = BOT_USERNAME.replace(/^@/, "").trim();
+function toCsvUrl(u) {
+  if (!u) return u;
+  u = u.replace("/pubhtml", "/pub");
+  if (!/[?&]output=csv/.test(u)) u += (u.includes("?") ? "&" : "?") + "output=csv";
+  return u;
+}
+
+/** Minimal CSV parser that handles quoted fields and embedded newlines. */
+function parseCSV(text) {
+  const rows = []; let row = []; let field = ""; let q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) {
+      if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else q = false; }
+      else field += c;
+    } else if (c === '"') q = true;
+    else if (c === ",") { row.push(field); field = ""; }
+    else if (c === "\n") { row.push(field); rows.push(row); row = []; field = ""; }
+    else if (c === "\r") { /* skip */ }
+    else field += c;
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+function col(headers, ...names) {
+  const lower = headers.map((h) => h.trim().toLowerCase());
+  for (const n of names) {
+    const idx = lower.findIndex((h) => h === n.toLowerCase() || h.includes(n.toLowerCase()));
+    if (idx !== -1) return idx;
+  }
+  return -1;
+}
+
+function fmt(n) { const v = String(n).replace(/[^\d.]/g, ""); return v ? Number(v).toLocaleString() : n; }
+
+function render(products) {
+  const root = document.getElementById("root");
+  if (products.length === 0) { root.innerHTML = '<div class="msg">No products available.</div>'; return; }
+
+  // unique per Product Name (anchor on the first row's Product ID), keep min price
+  const byName = new Map();
+  for (const p of products) {
+    const cur = byName.get(p.name);
+    if (!cur) byName.set(p.name, { ...p, min: p.priceNum });
+    else cur.min = Math.min(cur.min, p.priceNum);
+  }
+  // group by category, preserving first-seen order
+  const order = []; const groups = new Map();
+  for (const p of byName.values()) {
+    const cat = p.category || "Others";
+    if (!groups.has(cat)) { groups.set(cat, []); order.push(cat); }
+    groups.get(cat).push(p);
+  }
+
+  let html = "";
+  for (const cat of order) {
+    html += `<div class="cat">${escapeHtml(cat)}</div><div class="grid">`;
+    for (const p of groups.get(cat)) {
+      const logo = p.logo
+        ? `<img class="logo" src="${p.logo.startsWith("http") ? p.logo : LOGO_BASE + encodeURIComponent(p.logo)}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'logo',textContent:'${(p.icon || "🛍").replace(/'/g, "")}'}))">`
+        : `<div class="logo">${escapeHtml(p.icon || "🛍")}</div>`;
+      const price = p.min ? `<div class="price">${fmt(p.min)} MMK မှစ၍</div>` : "";
+      const promo = p.promo ? `<div class="badge">🎉 PROMO</div>` : "";
+      html += `<div class="card" data-id="${escapeHtml(p.id)}">${logo}<div class="name">${escapeHtml(p.name)}</div>${price}${promo}</div>`;
+    }
+    html += `</div>`;
+  }
+  root.innerHTML = html;
+
+  root.querySelectorAll(".card").forEach((el) => {
+    el.addEventListener("click", () => {
+      const id = el.getAttribute("data-id");
+      const link = `https://t.me/${BOT}?start=p_${encodeURIComponent(id)}`;
+      if (tg && tg.openTelegramLink) { tg.openTelegramLink(link); tg.close(); }
+      else window.open(link, "_blank");
+    });
+  });
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+async function load() {
+  try {
+    const res = await fetch(toCsvUrl(SHEET_CSV_URL));
+    const text = await res.text();
+    const rows = parseCSV(text).filter((r) => r.length > 1);
+    const headers = rows.shift() || [];
+    const iId = col(headers, "product id", "id");
+    const iName = col(headers, "product name", "name");
+    const iType = col(headers, "type");
+    const iPrice = col(headers, "price");
+    const iActive = col(headers, "active");
+    const iPromo = col(headers, "promo") ;
+    const iPromoPrice = col(headers, "promo price");
+    const iIcon = col(headers, "icon");
+    const iCat = col(headers, "category");
+    const iLogo = col(headers, "logo");
+
+    const products = rows
+      .filter((r) => (r[iId] || "").trim())
+      .map((r) => {
+        const promo = (r[iPromo] || "").trim().toLowerCase() === "yes";
+        const promoPrice = (r[iPromoPrice] || "").trim();
+        const rawPrice = promo && promoPrice ? promoPrice : (r[iPrice] || "0");
+        return {
+          id: (r[iId] || "").trim(),
+          name: (r[iName] || "").trim(),
+          priceNum: Number(String(rawPrice).replace(/[^\d.]/g, "")) || 0,
+          active: (r[iActive] || "").trim().toLowerCase(),
+          promo,
+          icon: iIcon > -1 ? (r[iIcon] || "").trim() : "",
+          category: iCat > -1 ? (r[iCat] || "").trim() : "",
+          logo: iLogo > -1 ? (r[iLogo] || "").trim() : "",
+        };
+      })
+      .filter((p) => p.active !== "no");
+
+    if (products.length === 0) {
+      document.getElementById("root").innerHTML =
+        '<div class="msg">No products parsed.<br><br>Rows read: ' + rows.length +
+        '<br>Product ID column: ' + (iId > -1 ? "found" : "NOT found") +
+        '<br><br>Headers seen:<br>' + escapeHtml(headers.join("  |  ")) + '</div>';
+      return;
+    }
+    render(products);
+  } catch (e) {
+    document.getElementById("root").innerHTML =
+      '<div class="msg">Could not load products.<br>Check SHEET_CSV_URL.<br><br>' +
+      escapeHtml(String(e && e.message || e)) + '</div>';
+    console.error(e);
+  }
+}
+load();
+</script>
+</body>
+</html>

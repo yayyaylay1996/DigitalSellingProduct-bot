@@ -5,10 +5,54 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const credentials = JSON.parse(
-  fs.readFileSync(path.join(__dirname, "google-credentials.json"), "utf-8")
-);
+
+/**
+ * Service-account credentials, resolved in this order:
+ *   1. GOOGLE_SERVICE_ACCOUNT_EMAIL + GOOGLE_PRIVATE_KEY   (cloud hosting)
+ *   2. GOOGLE_CREDENTIALS_JSON — the whole key file as one string
+ *   3. a service-account .json file sitting next to this script (local dev)
+ *
+ * The .json key is gitignored (correctly — it holds a private key), so it does
+ * NOT exist on a deployed server. Without the env-var paths below the bot would
+ * start fine locally and then crash on boot in the cloud.
+ */
+function loadCredentials() {
+  const client_email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
+  const rawKey = process.env.GOOGLE_PRIVATE_KEY;
+
+  if (client_email && rawKey) {
+    return {
+      client_email,
+      // Hosting dashboards can't store real newlines, so the key is pasted with
+      // literal "\n" sequences; turn them back into newlines. Stray wrapping
+      // quotes (which some dashboards keep) are stripped too — both are the
+      // classic "invalid PEM / DECODER routines" deploy failure.
+      private_key: rawKey.replace(/^["']|["']$/g, "").replace(/\\n/g, "\n"),
+    };
+  }
+
+  if (process.env.GOOGLE_CREDENTIALS_JSON) {
+    return JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON);
+  }
+
+  const localKey = fs
+    .readdirSync(__dirname)
+    .find((f) => /^digital-shop-bot-.*\.json$/.test(f) || f === "google-credentials.json");
+  if (localKey) {
+    return JSON.parse(fs.readFileSync(path.join(__dirname, localKey), "utf-8"));
+  }
+
+  throw new Error(
+    "No Google credentials found. Set GOOGLE_SERVICE_ACCOUNT_EMAIL + GOOGLE_PRIVATE_KEY " +
+      "(or GOOGLE_CREDENTIALS_JSON), or keep the service-account .json next to sheets.js."
+  );
+}
+
+const credentials = loadCredentials();
 const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+if (!spreadsheetId) {
+  throw new Error("Missing GOOGLE_SHEET_ID — set it in .env or in your host's variables.");
+}
 
 const auth = new google.auth.GoogleAuth({
   credentials,
@@ -17,9 +61,62 @@ const auth = new google.auth.GoogleAuth({
 
 const sheets = google.sheets({ version: "v4", auth });
 
+// ─── Read cache ──────────────────────────────────────────────────────────────
+// Every button tap used to re-read whole tabs from the Sheets API, and each of
+// those round trips costs a few hundred milliseconds. One product detail card
+// did three or four of them back to back, so a tap felt like a second or more
+// of nothing happening.
+//
+// These tabs are edited by hand and change rarely, so a short TTL makes taps
+// feel instant while still picking up sheet edits within a minute. Anything
+// that has to be exact at the instant it is read — the inventory row we are
+// about to sell, order lookups — bypasses the cache entirely.
+const TTL = {
+  products: 60_000,
+  settings: 60_000,
+  tips: 300_000,
+  faq: 300_000,
+  inventory: 10_000, // display counts only; the sell path always reads fresh
+};
+
+const cache = new Map();
+
+function cached(key, ttlMs, loader) {
+  const hit = cache.get(key);
+  if (hit && Date.now() < hit.expires) return hit.promise;
+
+  // Cache the promise rather than the resolved value: when several customers
+  // tap at the same moment they share one API call instead of firing one each.
+  const promise = loader().catch((err) => {
+    cache.delete(key); // never let a failed read stick around
+    throw err;
+  });
+  cache.set(key, { promise, expires: Date.now() + ttlMs });
+  return promise;
+}
+
+/** Drop cached tabs so the next read is fresh. Called after every write. */
+export function invalidate(...keys) {
+  if (keys.length === 0) return cache.clear();
+  for (const k of keys) cache.delete(k);
+}
+
+/** Warm the read-mostly tabs at boot so the first customer isn't the one who
+ *  pays the cold-start cost. Failures are non-fatal — normal reads will retry. */
+export async function warmCache() {
+  try {
+    await Promise.all([getSettings(), getProducts(), getFaqRows(), getTips()]);
+  } catch (e) {
+    console.warn("warmCache:", e.message);
+  }
+}
+
 // ─── Sheet layout (kept in one place so column maths stays readable) ──────────
 // Products:  A Product ID | B Product Name | C Variant | D Type | E Price (MMK)
-//            | F Description | G Active
+//            | F Description | G Active | H Promo | I Promo Price | J Duration
+//            | K Icon | L Category
+// Tips:      A Key (Product Name, "Name | Variant", or Type) | B Tips
+// FAQ:       A Key (Product Name) | B Question | C Answer | D Image (filename)
 // Inventory: A Inventory ID | B Product ID | C Account Credentials | D Status
 //            | E Sold To (Username) | F Sold Date/Time | G Order ID
 // Orders:    A Order ID | B Date Created | C Customer Username | D Customer Chat ID
@@ -67,17 +164,19 @@ export function now() {
  * Always read live — payment/admin details must never be hardcoded.
  */
 export async function getSettings() {
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId,
-    range: "Settings!A2:B",
+  return cached("settings", TTL.settings, async () => {
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: "Settings!A2:B",
+    });
+    const rows = res.data.values || [];
+    const out = {};
+    for (const row of rows) {
+      const key = (row[0] || "").trim();
+      if (key) out[key] = (row[1] || "").trim();
+    }
+    return out;
   });
-  const rows = res.data.values || [];
-  const out = {};
-  for (const row of rows) {
-    const key = (row[0] || "").trim();
-    if (key) out[key] = (row[1] || "").trim();
-  }
-  return out;
 }
 
 /**
@@ -107,32 +206,191 @@ export async function setSetting(key, value) {
       requestBody: { values: [[value]] },
     });
   }
+  invalidate("settings"); // the cached copy is now stale
 }
 
 // ─── Products (catalog only — no stock, no credentials) ──────────────────────
 
 /**
- * Read the Products tab. Returns active products only, each as
- * { id, name, variant, type, price, description, active }.
+ * Normalize the Type column to one of two canonical values:
+ *   "auto"   → delivered instantly from Inventory (old name: "ready")
+ *   "manual" → handed off to admin to set up (old name: "email")
+ * Both the old and new sheet words are accepted so nothing breaks before the
+ * sheet's Type values are migrated.
  */
-export async function getProducts() {
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId,
-    range: "Products!A2:G",
-  });
-  const rows = res.data.values || [];
-  return rows
-    .filter((row) => row[0]) // must have a Product ID
-    .map((row) => ({
-      id: (row[0] || "").trim(),
-      name: (row[1] || "").trim(),
-      variant: (row[2] || "").trim(),
-      type: (row[3] || "").toLowerCase().trim(), // "ready" | "email"
-      price: (row[4] || "0").toString().trim(),
-      description: row[5] || "",
-      active: (row[6] || "").trim(),
+export function normalizeType(raw) {
+  const t = (raw || "").toLowerCase().trim();
+  if (t === "auto" || t === "ready") return "auto";
+  if (t === "manual" || t === "email") return "manual";
+  return "auto"; // safe default: treat unknown as auto-delivery
+}
+
+/**
+ * Map raw Products values (INCLUDING the header row) to product objects, reading
+ * columns BY HEADER NAME so the sheet's column order can drift without breaking.
+ * Duplicate headers (e.g. two "Duration" columns) resolve to the first one.
+ */
+export function mapProductsFromValues(values) {
+  const headers = (values[0] || []).map((h) => (h || "").trim().toLowerCase());
+  const find = (...cands) => {
+    for (const c of cands) {
+      const i = headers.findIndex((h) => h === c);
+      if (i !== -1) return i;
+    }
+    for (const c of cands) {
+      const i = headers.findIndex((h) => h.includes(c));
+      if (i !== -1) return i;
+    }
+    return -1;
+  };
+  const iId = find("product id", "id");
+  const iName = find("product name", "name");
+  const iVariant = find("variant");
+  const iType = find("type");
+  const iPrice = find("price"); // exact "price" wins over "promo price"
+  const iDesc = find("description");
+  const iDuration = find("duration");
+  const iActive = find("active");
+  const iPromo = find("promo"); // exact "promo" wins over "promo price"
+  const iPromoPrice = find("promo price");
+  const iIcon = find("icon");
+  const iCategory = find("category");
+  const iLogo = find("logo");
+  const g = (r, i) => (i > -1 ? r[i] || "" : "");
+
+  return values
+    .slice(1)
+    .filter((r) => g(r, iId).trim()) // must have a Product ID
+    .map((r) => ({
+      id: g(r, iId).trim(),
+      name: g(r, iName).trim(),
+      variant: g(r, iVariant).trim(),
+      type: normalizeType(g(r, iType)), // "auto" | "manual"
+      price: (g(r, iPrice) || "0").toString().trim(),
+      description: g(r, iDesc),
+      active: g(r, iActive).trim(),
+      promo: g(r, iPromo).toLowerCase().trim() === "yes",
+      promoPrice: g(r, iPromoPrice).toString().trim(),
+      duration: g(r, iDuration).trim(),
+      icon: g(r, iIcon).trim(),
+      category: g(r, iCategory).trim(),
+      logo: g(r, iLogo).trim(),
     }))
     .filter((p) => p.active.toLowerCase() !== "no");
+}
+
+/**
+ * Read the Products tab (active products only), keyed by header name so column
+ * order is irrelevant. See mapProductsFromValues for the field list.
+ */
+export async function getProducts() {
+  return cached("products", TTL.products, async () => {
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: "Products!A1:Z",
+    });
+    return mapProductsFromValues(res.data.values || []);
+  });
+}
+
+/**
+ * Effective price for a product: the promo price when the product is on promo
+ * AND a promo price is set, otherwise the regular price. Returns a string.
+ */
+export function effectivePrice(p) {
+  return p.promo && p.promoPrice ? p.promoPrice : p.price;
+}
+
+// ─── Tips (per-product advice sent on delivery; editable in the sheet) ───────
+
+/**
+ * Read the Tips tab into a lookup keyed by lowercased Key. Keys may be a
+ * Product Name (e.g. "quillbot") or a Type ("auto" / "manual"). Returns {} if
+ * the tab is missing so the bot keeps working without it.
+ */
+export async function getTips() {
+  return cached("tips", TTL.tips, async () => {
+    try {
+      const res = await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range: "Tips!A2:B",
+      });
+      const rows = res.data.values || [];
+      const out = {};
+      for (const row of rows) {
+        const key = (row[0] || "").trim().toLowerCase();
+        if (key) out[key] = (row[1] || "").trim();
+      }
+      return out;
+    } catch (e) {
+      console.warn("getTips: Tips tab not available —", e.message);
+      return {};
+    }
+  });
+}
+
+/**
+ * Resolve the tips text for a product, most specific first:
+ *   1. "Product Name | Variant"  (per-variant reminder, e.g. Share vs Private)
+ *   2. "Product Name"            (whole product)
+ *   3. Type                      ("auto" / "manual")
+ * Returns "" when nothing matches.
+ */
+export async function resolveTips(product) {
+  const tips = await getTips();
+  const nameVariant = `${product.name} | ${product.variant}`.toLowerCase();
+  return (
+    tips[nameVariant] ||
+    tips[product.name.toLowerCase()] ||
+    tips[product.type] ||
+    ""
+  );
+}
+
+// ─── FAQ (per-product Q&A button on the detail card) ─────────────────────────
+
+/**
+ * Read every FAQ row as an array of
+ * { rowNumber, key, question, answer, image }.
+ * A product can have several FAQ rows (several question buttons). `image` is an
+ * optional filename in faq-images/ — when set, the answer is sent as a photo.
+ * rowNumber is the stable handle used in the button callback.
+ */
+export async function getFaqRows() {
+  return cached("faq", TTL.faq, async () => {
+    try {
+      const res = await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range: "FAQ!A2:D",
+      });
+      const rows = res.data.values || [];
+      return rows
+        .map((row, i) => ({
+          rowNumber: i + 2,
+          key: (row[0] || "").trim(),
+          question: (row[1] || "").trim(),
+          answer: (row[2] || "").trim(),
+          image: (row[3] || "").trim(),
+        }))
+        .filter((f) => f.key && f.question && (f.answer || f.image));
+    } catch (e) {
+      console.warn("getFaqRows: FAQ tab not available —", e.message);
+      return [];
+    }
+  });
+}
+
+/** All FAQ rows for a product (by Product Name), in sheet order. */
+export async function getFaqsForProduct(product) {
+  const rows = await getFaqRows();
+  const name = product.name.toLowerCase();
+  return rows.filter((f) => f.key.toLowerCase() === name);
+}
+
+/** One FAQ by its sheet row number (from the button callback), or null. */
+export async function getFaqByRow(rowNumber) {
+  const rows = await getFaqRows();
+  return rows.find((f) => f.rowNumber === Number(rowNumber)) || null;
 }
 
 /** Find one product by its Product ID (the join key). */
@@ -147,7 +405,7 @@ export async function getProductById(productId) {
  * Read the Inventory tab as objects, preserving the sheet row number so we can
  * update a specific row later.
  */
-async function getInventory() {
+async function fetchInventory() {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId,
     range: "Inventory!A2:G",
@@ -167,6 +425,11 @@ async function getInventory() {
     .filter((r) => r.inventoryId); // skip blank rows
 }
 
+/** Cached inventory — fine for showing stock counts while browsing. */
+async function getInventory() {
+  return cached("inventory", TTL.inventory, fetchInventory);
+}
+
 /**
  * Live stock for a ready product = number of Inventory rows with this Product ID
  * and Status "Available". Never stored — always counted.
@@ -178,9 +441,12 @@ export async function countAvailableStock(productId) {
   ).length;
 }
 
-/** First Available Inventory row for a product, or null if sold out. */
+/** First Available Inventory row for a product, or null if sold out.
+ *  Deliberately reads FRESH (never cached): this is the row we are about to
+ *  sell, and handing two customers the same account because of a stale read
+ *  would be a real problem, unlike a stock count that is a few seconds old. */
 export async function getAvailableInventory(productId) {
-  const inv = await getInventory();
+  const inv = await fetchInventory();
   return (
     inv.find(
       (r) => r.productId === productId && r.status.toLowerCase() === "available"
@@ -199,12 +465,13 @@ export async function markInventorySold(rowNumber, { soldTo, orderId }) {
     valueInputOption: "USER_ENTERED",
     requestBody: { values: [["Sold", soldTo, now(), orderId]] },
   });
+  invalidate("inventory"); // stock just changed — don't show the old count
 }
 
 // ─── Orders ──────────────────────────────────────────────────────────────────
 
-/** Next auto-increment Order ID, e.g. "ORD-0001". */
-async function nextOrderId() {
+/** Highest existing Order number in the sheet (0 when none). */
+export async function getMaxOrderNumber() {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId,
     range: "Orders!A2:A",
@@ -215,41 +482,57 @@ async function nextOrderId() {
     const m = id.match(/ORD-(\d+)/i);
     if (m) max = Math.max(max, parseInt(m[1], 10));
   }
-  return `ORD-${String(max + 1).padStart(4, "0")}`;
+  return max;
+}
+
+/** Next auto-increment Order ID, e.g. "ORD-0001". */
+async function nextOrderId() {
+  return `ORD-${String((await getMaxOrderNumber()) + 1).padStart(4, "0")}`;
 }
 
 /**
- * Create a new order row in "Awaiting Payslip" state and return the Order ID.
- * Only the fields known at purchase time are filled; the rest stay blank until
- * payslip / admin / delivery steps update them.
+ * Append an order row. The row is written only when we actually want it recorded
+ * (i.e. on Verify) — pass the pre-reserved `orderId` and the final field values.
+ * Anything omitted falls back to the "fresh order" defaults.
  */
 export async function createOrder({
+  orderId,
+  dateCreated,
   customerUsername,
   customerChatId,
   productId,
   productName,
   variant,
   price,
+  paymentStatus = "Awaiting Payslip",
+  payslipSent = "No",
+  adminDecision = "Pending",
+  decisionTime = "",
+  deliveryStatus = "Not Delivered",
+  inventoryIdUsed = "",
+  credentialsSent = "",
+  usedDateTime = "",
+  notes = "",
 }) {
-  const orderId = await nextOrderId();
+  const id = orderId || (await nextOrderId());
   const row = [
-    orderId, // A Order ID
-    now(), // B Date Created
+    id, // A Order ID
+    dateCreated || now(), // B Date Created
     customerUsername, // C Customer Username
     customerChatId, // D Customer Chat ID
     productId, // E Product ID
     productName, // F Product Name
     variant, // G Variant
     price, // H Price (MMK)
-    "Awaiting Payslip", // I Payment Status
-    "No", // J Payslip Sent
-    "Pending", // K Admin Decision
-    "", // L Decision Time
-    "Not Delivered", // M Delivery Status
-    "", // N Inventory ID Used
-    "", // O Credentials Sent
-    "", // P Used Date/Time
-    "", // Q Notes
+    paymentStatus, // I Payment Status
+    payslipSent, // J Payslip Sent
+    adminDecision, // K Admin Decision
+    decisionTime, // L Decision Time
+    deliveryStatus, // M Delivery Status
+    inventoryIdUsed, // N Inventory ID Used
+    credentialsSent, // O Credentials Sent
+    usedDateTime, // P Used Date/Time
+    notes, // Q Notes
   ];
   await sheets.spreadsheets.values.append({
     spreadsheetId,
@@ -257,21 +540,13 @@ export async function createOrder({
     valueInputOption: "USER_ENTERED",
     requestBody: { values: [row] },
   });
-  return orderId;
+  return id;
 }
 
-/** Find an order by Order ID. Returns an object with rowNumber, or null. */
-export async function getOrderByOrderId(orderId) {
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId,
-    range: "Orders!A2:Q",
-  });
-  const rows = res.data.values || [];
-  const i = rows.findIndex((r) => (r[0] || "").trim() === orderId);
-  if (i === -1) return null;
-  const r = rows[i];
+/** Map a raw Orders sheet row (array) to an order object, given its row index. */
+function rowToOrder(r, rowNumber) {
   return {
-    rowNumber: i + 2,
+    rowNumber,
     orderId: (r[0] || "").trim(),
     dateCreated: r[1] || "",
     customerUsername: r[2] || "",
@@ -290,6 +565,56 @@ export async function getOrderByOrderId(orderId) {
     usedDateTime: r[15] || "",
     notes: r[16] || "",
   };
+}
+
+/**
+ * All orders for one customer chat id, newest first. Used by Order History.
+ * `limit` caps how many are returned (default 10).
+ */
+export async function getOrdersByChatId(chatId, limit = 10) {
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: "Orders!A2:Q",
+  });
+  const rows = res.data.values || [];
+  const matches = [];
+  rows.forEach((r, i) => {
+    if (String(r[3] || "").trim() === String(chatId)) {
+      matches.push(rowToOrder(r, i + 2));
+    }
+  });
+  return matches.reverse().slice(0, limit); // newest first
+}
+
+/**
+ * Unique customer chat IDs from the Orders tab — the audience for broadcasts.
+ * A bot can only message users who have interacted with it, and an order is
+ * the point where we capture a chat ID, so past buyers are the reachable set.
+ */
+export async function getAllCustomerChatIds() {
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: "Orders!D2:D",
+  });
+  const rows = res.data.values || [];
+  const set = new Set();
+  for (const r of rows) {
+    const id = (r[0] || "").toString().trim();
+    if (id) set.add(id);
+  }
+  return [...set];
+}
+
+/** Find an order by Order ID. Returns an object with rowNumber, or null. */
+export async function getOrderByOrderId(orderId) {
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: "Orders!A2:Q",
+  });
+  const rows = res.data.values || [];
+  const i = rows.findIndex((r) => (r[0] || "").trim() === orderId);
+  if (i === -1) return null;
+  return rowToOrder(rows[i], i + 2);
 }
 
 /**
