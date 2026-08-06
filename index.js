@@ -1042,21 +1042,19 @@ function expiryOneYear() {
 }
 
 const CANVA_MSG_A =
-  "ငွေလက်ခံရရှိပါသည် Canva အကောင့်လုပ်ထားတဲ့ ကိုယ့်ရဲ့mail ပို့ပေးရမှာပါရှင် (password မလိုပါရှင်) \n" +
+  "ငွေလက်ခံရရှိပါသည် \n Canva အကောင့်လုပ်ထားတဲ့ ကိုယ့်ရဲ့ Gmail ကို အရင်ရိုက်ထည့်ပါ ပြီးမှ Send Gmail Invite ကိုနှိပ်ပါရှင် (password မလိုပါ) \n" +
   "🩵🩵မှတ်ချက် 🩵🩵\n" +
-  "Email မပို့ခင် spelling/ အကြီးအသေး မမှားအောင် စာရိုက်ပြီး သေချာလေး စစ်ပြီးပို့ပေးပါနော်🙏🏻🙏🏻🙏🏻";
+  "Gmail တစ်ကောင့်ကိ ု၁ခါပဲ invite လို့ရတာမို့ mail မပို့ခင် spelling/ အကြီးအသေး သေချာလေး စစ်ပြီးမှပို့ပေးပါနော်  🙏🏻🙏🏻🙏🏻";
 
 const CANVA_MSG_C =
   "ပို့ထားတဲ့ gmail ရဲ့ inbox လေးစစ်ပေးပါရှင်😇 Invite ပို့ထားပါတယ် Join Team နှိပ်ပေးပါ\n" +
-  "(သတိပြုရန်💕💕💕)\n" +
-  "👉🏻ဖုန်းနဲ့သုံးနေတာပဲဖြစ်ဖြစ် … \n" +
-  "Computer နဲ့သုံးနေတာပဲဖြစ်ဖြစ် …\n" +
-  "👉🏻Canva application မှာဝင်ထားတဲ့ အကောင့်ဟာ invite လုပ်ထားတဲ့ gmail နဲ့ဝင်ထားတာ ဖြစ်ရပါမယ်နော် 🥰 (same gmail ဖြစ်ရပါမယ်) \n" +
+  "(Join မနှိပ်ခင် သတိပြုရန်💕💕💕)\n" +
+  "👉🏻Canva application မှာဝင်ထားတဲ့ အကောင့်ဟာ invite လုပ်ထားတဲ့ gmail နဲ့ same gmail ဖြစ်ရပါမယ်( မဟုတ်ရင် Can't Join the Team ပေါ်မှာပါ) \n" +
   "ပြီးရင် OK button နှိပ်ပေးပါ instructions ဆက်ပြောပေးပါလိမ့်မယ်";
 
 const CANVA_MSG_D =
   "https://t.me/goingforward_premium/115\n" +
-  "အပေါ်က link လေးကို နှိပ်ပြီး join နည်း instruction တွေ share ပေးထားပါတယ် Join ကြည့်ပါ\n" +
+  "အပေါ်က ကျွန်မတို့ Channel ရဲ့link လေးကို နှိပ်ပြီး join နည်း instruction တွေ ပုံနဲ့တကွ share ပေးထားပါတယ် \n" +
   "သိချင်တာ မေးချင်တာရှိရင် အချိန်မရွေး မေးလို့ရပါတယ်\n" +
   "Urgent call များအတွက် 09758230214 ကို ဆက်သွယ်နိုင်ပါတယ်နော် \n\n" +
   "Expired date : ";
