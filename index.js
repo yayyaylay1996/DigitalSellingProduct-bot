@@ -620,6 +620,42 @@ function customerButtonRow(label, text = "💬 Message customer") {
   return url ? [{ text, url }] : null;
 }
 
+/**
+ * Forward the customer's own screenshot to the admin, then send the details
+ * and action buttons underneath.
+ *
+ * Why forward instead of re-sending the photo by file_id: a forwarded message
+ * carries a "Forwarded from" header that opens the sender's chat when tapped.
+ * That is the only mechanism that reliably reaches a customer who has never
+ * set a @username — a tg://user?id= mention only resolves if the admin's
+ * client already knows that user, which for a first-time buyer it does not.
+ *
+ * If the customer has forwarding restricted in their privacy settings the
+ * forward fails, so we fall back to sending the photo by file_id as before.
+ */
+async function sendPayslipToAdmin(adminId, msg, caption, keyboardRows) {
+  let forwarded = false;
+  try {
+    await bot.forwardMessage(adminId, msg.chat.id, msg.message_id);
+    forwarded = true;
+  } catch (e) {
+    console.warn("forwardMessage failed, falling back to file_id:", e.message);
+  }
+
+  if (!forwarded) {
+    const fileId = msg.photo[msg.photo.length - 1].file_id; // largest size
+    await bot.sendPhoto(adminId, fileId, { caption, parse_mode: "HTML" });
+    return bot.sendMessage(adminId, "👆 Payslip", {
+      reply_markup: { inline_keyboard: keyboardRows },
+    });
+  }
+
+  return bot.sendMessage(adminId, caption, {
+    parse_mode: "HTML",
+    reply_markup: { inline_keyboard: keyboardRows },
+  });
+}
+
 /** Parse a price/amount cell that might have stray commas or spaces
  *  ("7,000") into a real number. NaN on anything unparseable — every wallet
  *  call site below treats NaN as "can't use the wallet here", never as 0. */
@@ -836,17 +872,42 @@ async function handleCancel(query, pendingId) {
 // ─── Admin decisions ─────────────────────────────────────────────────────────
 
 /** Append a status line to the admin's payslip message and remove its buttons so
- *  it can't be tapped twice. */
+ *  it can't be tapped twice.
+ *
+ *  Handles both message kinds: the buttons sit on a photo caption when the
+ *  payslip was sent by file_id, but on a plain text message when the photo was
+ *  forwarded (a forward can't carry a caption or keyboard of its own). Calling
+ *  editMessageCaption on a text message fails, which would leave the buttons
+ *  live and tappable a second time. */
 async function closeAdminMessage(query, statusLabel) {
+  const isPhoto = typeof query.message.caption === "string";
   try {
-    const original = query.message.caption || "";
-    await bot.editMessageCaption(`${original}\n\n${statusLabel}`, {
-      chat_id: query.message.chat.id,
-      message_id: query.message.message_id,
-      reply_markup: { inline_keyboard: [] },
-    });
+    if (isPhoto) {
+      await bot.editMessageCaption(`${query.message.caption}\n\n${statusLabel}`, {
+        chat_id: query.message.chat.id,
+        message_id: query.message.message_id,
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard: [] },
+      });
+    } else {
+      await bot.editMessageText(`${query.message.text || ""}\n\n${statusLabel}`, {
+        chat_id: query.message.chat.id,
+        message_id: query.message.message_id,
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard: [] },
+      });
+    }
   } catch (e) {
     console.error("closeAdminMessage:", e.message);
+    // Last resort: at least strip the buttons so the action can't be repeated.
+    try {
+      await bot.editMessageReplyMarkup(
+        { inline_keyboard: [] },
+        { chat_id: query.message.chat.id, message_id: query.message.message_id }
+      );
+    } catch (_) {
+      /* nothing more we can do */
+    }
   }
 }
 
@@ -1464,7 +1525,6 @@ bot.on("photo", async (msg) => {
     pending.payslipReceived = true; // forward once
     awaitingPayslip.delete(chatId);
 
-    const fileId = msg.photo[msg.photo.length - 1].file_id; // largest size
     const s = await getSettings();
     const adminId = await resolveAdminChatId(s);
     const caption = [
@@ -1473,6 +1533,7 @@ bot.on("photo", async (msg) => {
       `Product: ${esc(pending.productName)} (${esc(pending.variant)})`,
       `Price: ${esc(pending.price)} MMK`,
       `Customer: ${customerMention(pending.customerUsername, pending.customerChatId)}`,
+      `<i>Tap the “Forwarded from” name above to open their chat.</i>`,
     ].join("\n");
 
     if (adminId) {
@@ -1485,11 +1546,7 @@ bot.on("photo", async (msg) => {
       const contact = customerButtonRow(pending.customerUsername);
       if (contact) rows.push(contact);
 
-      await bot.sendPhoto(adminId, fileId, {
-        caption,
-        parse_mode: "HTML",
-        reply_markup: { inline_keyboard: rows },
-      });
+      await sendPayslipToAdmin(adminId, msg, caption, rows);
     } else {
       console.warn(
         `No admin chat id known; cannot forward payslip for ${pending.orderId}. ` +
@@ -1523,7 +1580,6 @@ async function handleTopupPhoto(msg) {
     pending.payslipReceived = true;
     awaitingTopupPayslip.delete(String(chatId));
 
-    const fileId = msg.photo[msg.photo.length - 1].file_id;
     const s = await getSettings();
     const adminId = await resolveAdminChatId(s);
     // No amount line — the customer never declared one. The admin reads the
@@ -1532,6 +1588,7 @@ async function handleTopupPhoto(msg) {
       `👛 <b>Wallet top-up request</b>`,
       `Ref: ${esc(pending.txId)}`,
       `Customer: ${customerMention(pending.username, pending.chatId)}`,
+      `<i>Tap the “Forwarded from” name above to open their chat.</i>`,
       ``,
       `Confirm, then send the amount shown on the slip.`,
     ].join("\n");
@@ -1546,11 +1603,7 @@ async function handleTopupPhoto(msg) {
       const contact = customerButtonRow(pending.username);
       if (contact) rows.push(contact);
 
-      await bot.sendPhoto(adminId, fileId, {
-        caption,
-        parse_mode: "HTML",
-        reply_markup: { inline_keyboard: rows },
-      });
+      await sendPayslipToAdmin(adminId, msg, caption, rows);
     } else {
       console.warn(
         `No admin chat id known; cannot forward top-up for ${pending.txId}. ` +
