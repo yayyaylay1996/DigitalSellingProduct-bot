@@ -963,7 +963,14 @@ async function deliverAutoOrder(base, product, inv, adminId, meta) {
     // visually separate from the surrounding message.
     `<code>${esc(inv.credentials)}</code>`,
     `━━━━━━━━━━━━━━━`,
-  ];
+    ``,
+    // The moment the account is handed over — this is what the customer counts
+    // their subscription from, so it goes on the delivery card itself rather
+    // than only into the sheet.
+    `🕒 <b>စတင်ချိန်</b>`,
+    `${esc(meta.decisionTime)}`,
+    product && product.duration ? `⏳ သက်တမ်း — ${esc(product.duration)}` : null,
+  ].filter((l) => l !== null);
   if (tips) card.push(``, `💡 <b>အကြံပြုချက်</b>`, `<blockquote>${esc(tips)}</blockquote>`);
   card.push(``, `🙏 ဝယ်ယူအားပေးမှုအတွက် ကျေးဇူးတင်ပါတယ်!`);
   await bot.sendMessage(base.customerChatId, card.join("\n"), { parse_mode: "HTML" });
@@ -1148,9 +1155,9 @@ function expiryOneYear() {
 }
 
 const CANVA_MSG_A =
-  "ငွေလက်ခံရရှိပါသည် \n Canva အကောင့်လုပ်ထားတဲ့ ကိုယ့်ရဲ့ Gmail ကို အရင်ရိုက်ထည့်ပါ ပြီးမှ Send Gmail Invite ကိုနှိပ်ပါရှင် (password မလိုပါ) \n" +
+  "ငွေလက်ခံရရှိပါသည် \nCanva အကောင့်လုပ်ထားတဲ့ ကိုယ့်ရဲ့ Gmail ကို အရင်ပို့ပေးပါ၊၊ ပြီးမှ Send Gmail Invite ကိုနှိပ်ပါရှင်(password မလိုပါ) \n" +
   "🩵🩵မှတ်ချက် 🩵🩵\n" +
-  "Gmail တစ်ကောင့်ကိ ု၁ခါပဲ invite လို့ရတာမို့ mail မပို့ခင် spelling/ အကြီးအသေး သေချာလေး စစ်ပြီးမှပို့ပေးပါနော်  🙏🏻🙏🏻🙏🏻";
+  "Gmail တစ်ကောင့်ကို ၁ခါပဲ invite လို့ရတာမို့ mail မပို့ခင် spelling/ အကြီးအသေး သေချာလေး စစ်ပြီးမှပို့ပေးပါနော်  🙏🏻🙏🏻🙏🏻";
 
 const CANVA_MSG_C =
   "ပို့ထားတဲ့ gmail ရဲ့ inbox လေးစစ်ပေးပါရှင်😇 Invite ပို့ထားပါတယ် Join Team နှိပ်ပေးပါ\n" +
@@ -1529,6 +1536,8 @@ bot.on("photo", async (msg) => {
     const adminId = await resolveAdminChatId(s);
     const caption = [
       `🧾 <b>New payslip</b>`,
+      `🕒 ${esc(now())}`, // when the payslip actually arrived
+      ``,
       `Order: ${esc(pending.orderId)}`,
       `Product: ${esc(pending.productName)} (${esc(pending.variant)})`,
       `Price: ${esc(pending.price)} MMK`,
@@ -1586,6 +1595,8 @@ async function handleTopupPhoto(msg) {
     // figure off the screenshot and types it after confirming.
     const caption = [
       `👛 <b>Wallet top-up request</b>`,
+      `🕒 ${esc(now())}`, // when the payslip actually arrived
+      ``,
       `Ref: ${esc(pending.txId)}`,
       `Customer: ${customerMention(pending.username, pending.chatId)}`,
       `<i>Tap the “Forwarded from” name above to open their chat.</i>`,
