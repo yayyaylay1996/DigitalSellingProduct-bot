@@ -125,6 +125,9 @@ export async function warmCache() {
 //            | L Decision Time | M Delivery Status | N Inventory ID Used
 //            | O Credentials Sent | P Used Date/Time | Q Notes
 // Settings:  A Key | B Value | C Notes
+// Wallets:   A ChatID | B Username | C Balance (MMK) | D Last Updated
+// WalletTx:  A Tx ID | B Date | C ChatID | D Username | E Type (TopUp/Purchase)
+//            | F Amount (+/-) | G Balance After | H Order/Ref ID | I Notes
 
 // Order column letters keyed by the field names used across the app.
 const ORDER_COLS = {
@@ -639,4 +642,246 @@ export async function updateOrderByOrderId(orderId, fields) {
     spreadsheetId,
     requestBody: { valueInputOption: "USER_ENTERED", data },
   });
+}
+
+// ─── Wallet ──────────────────────────────────────────────────────────────────
+// Two new tabs, created by hand in the spreadsheet before this ships:
+//   Wallets:  A ChatID | B Username | C Balance (MMK) | D Last Updated
+//   WalletTx: A Tx ID | B Date | C ChatID | D Username | E Type
+//             (TopUp / Purchase) | F Amount (+/-) | G Balance After
+//             | H Order/Ref ID | I Notes
+//
+// Balance is always read fresh here, never through the TTL cache above — it's
+// money, and a customer buying twice off a stale cached balance is a real
+// problem in a way a stale product list is not. Sheets isn't transactional,
+// so a genuinely simultaneous double-tap from the same customer could in
+// theory race past the check-then-write in chargeWallet; that risk is
+// accepted at this bot's volume, the same trade-off already made for
+// Inventory (see markInventorySold above).
+
+/**
+ * Create the Wallets / WalletTx tabs (with headers) if they're missing.
+ *
+ * Reads can shrug off a missing tab by returning 0 or [], but every write
+ * path — reserving a Tx ID, crediting, appending a ledger row — genuinely
+ * needs the tab to exist, and Google's "Unable to parse range" error is
+ * opaque when it surfaces to a customer. Creating them on demand removes the
+ * manual setup step (and the class of bug where it's forgotten) entirely.
+ *
+ * Runs at most once per process: after the first success the promise is
+ * cached, so this costs one metadata call at startup, not one per top-up.
+ */
+let walletTabsReady = null;
+export function ensureWalletTabs() {
+  if (walletTabsReady) return walletTabsReady;
+
+  walletTabsReady = (async () => {
+    const meta = await sheets.spreadsheets.get({ spreadsheetId, fields: "sheets.properties.title" });
+    const existing = new Set((meta.data.sheets || []).map((s) => s.properties.title));
+
+    const wanted = [
+      { title: "Wallets", headers: ["ChatID", "Username", "Balance (MMK)", "Last Updated"] },
+      {
+        title: "WalletTx",
+        headers: [
+          "Tx ID", "Date", "ChatID", "Username", "Type",
+          "Amount (+/-)", "Balance After", "Order/Ref ID", "Notes",
+        ],
+      },
+    ].filter((t) => !existing.has(t.title));
+
+    if (wanted.length === 0) return true;
+
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: wanted.map((t) => ({ addSheet: { properties: { title: t.title } } })),
+      },
+    });
+    for (const t of wanted) {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId,
+        range: `${t.title}!A1`,
+        valueInputOption: "RAW",
+        requestBody: { values: [t.headers] },
+      });
+      console.log(`✔ Created missing "${t.title}" tab`);
+    }
+    return true;
+  })().catch((e) => {
+    walletTabsReady = null; // let a later call retry rather than caching failure
+    throw e;
+  });
+
+  return walletTabsReady;
+}
+
+/** Same "tab might not exist yet" tolerance as getTips/getFaqRows above — a
+ *  customer whose wallet checkout falls back to bank transfer because the
+ *  Wallets tab isn't there yet is fine; a purchase silently failing is not. */
+async function findWalletRow(chatId) {
+  try {
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: "Wallets!A2:D",
+    });
+    const rows = res.data.values || [];
+    for (let i = 0; i < rows.length; i++) {
+      if (String(rows[i][0] || "").trim() === String(chatId)) {
+        return {
+          rowNumber: i + 2,
+          chatId: (rows[i][0] || "").trim(),
+          username: rows[i][1] || "",
+          balance: Number(rows[i][2] || 0),
+        };
+      }
+    }
+    return null;
+  } catch (e) {
+    console.warn("findWalletRow: Wallets tab not available —", e.message);
+    return null;
+  }
+}
+
+/** Current wallet balance for a customer. 0 if they have never topped up. */
+export async function getWalletBalance(chatId) {
+  const row = await findWalletRow(chatId);
+  return row ? row.balance : 0;
+}
+
+async function appendWalletTx({ txId, chatId, username, type, amount, balanceAfter, refId, notes }) {
+  await sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range: "WalletTx!A:I",
+    valueInputOption: "USER_ENTERED",
+    requestBody: {
+      values: [[txId, now(), chatId, username, type, amount, balanceAfter, refId || "", notes || ""]],
+    },
+  });
+}
+
+/**
+ * Reserve the next Wallet Transaction ID (WTX-0001, WTX-0002, ...), accounting
+ * for both the sheet and any top-up requests still pending in memory — same
+ * pattern as reserveOrderId in index.js, just for the wallet ledger.
+ */
+export async function reserveWalletTxId(pendingIds = []) {
+  await ensureWalletTabs();
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: "WalletTx!A2:A",
+  });
+  const rows = res.data.values || [];
+  let max = 0;
+  for (const r of rows) {
+    const m = /WTX-(\d+)/i.exec(r[0] || "");
+    if (m) max = Math.max(max, parseInt(m[1], 10));
+  }
+  for (const id of pendingIds) {
+    const m = /WTX-(\d+)/i.exec(id || "");
+    if (m) max = Math.max(max, parseInt(m[1], 10));
+  }
+  return `WTX-${String(max + 1).padStart(4, "0")}`;
+}
+
+/**
+ * Credit a customer's wallet — used once the admin approves a top-up payslip.
+ * Creates the Wallets row on a customer's first-ever top-up. Returns the new
+ * balance.
+ */
+export async function creditWallet({ chatId, username, amount, txId, notes }) {
+  await ensureWalletTabs();
+  const row = await findWalletRow(chatId);
+  const current = row ? row.balance : 0;
+  const newBalance = current + Number(amount);
+
+  if (row) {
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `Wallets!C${row.rowNumber}:D${row.rowNumber}`,
+      valueInputOption: "USER_ENTERED",
+      requestBody: { values: [[newBalance, now()]] },
+    });
+  } else {
+    await sheets.spreadsheets.values.append({
+      spreadsheetId,
+      range: "Wallets!A:D",
+      valueInputOption: "USER_ENTERED",
+      requestBody: { values: [[chatId, username, newBalance, now()]] },
+    });
+  }
+  await appendWalletTx({
+    txId,
+    chatId,
+    username,
+    type: "TopUp",
+    amount: Number(amount),
+    balanceAfter: newBalance,
+    notes,
+  });
+  return newBalance;
+}
+
+/**
+ * Debit a customer's wallet for a purchase, but ONLY if the balance still
+ * covers it at the exact moment of writing (re-read fresh, not the balance
+ * the menu showed a moment ago). Returns the new balance, or null when the
+ * funds weren't there — the caller must not deliver the product in that case.
+ */
+export async function chargeWallet({ chatId, username, amount, orderId }) {
+  await ensureWalletTabs();
+  const amt = Number(amount);
+  // A non-numeric or non-positive amount must never reach the sheet — refuse
+  // rather than risk writing NaN into someone's balance.
+  if (!Number.isFinite(amt) || amt <= 0) return null;
+
+  const row = await findWalletRow(chatId);
+  const current = row ? row.balance : 0;
+  if (!row || current < amt) return null;
+
+  const newBalance = current - amt;
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range: `Wallets!C${row.rowNumber}:D${row.rowNumber}`,
+    valueInputOption: "USER_ENTERED",
+    requestBody: { values: [[newBalance, now()]] },
+  });
+  const txId = `WTX-${orderId.replace(/^ORD-/, "")}`; // ties the tx to the order at a glance
+  await appendWalletTx({
+    txId,
+    chatId,
+    username,
+    type: "Purchase",
+    amount: -amt,
+    balanceAfter: newBalance,
+    refId: orderId,
+  });
+  return newBalance;
+}
+
+/** Most recent wallet transactions for a customer, newest first. Empty list
+ *  (not a thrown error) if the WalletTx tab isn't there yet. */
+export async function getWalletTransactions(chatId, limit = 5) {
+  try {
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: "WalletTx!A2:I",
+    });
+    const rows = res.data.values || [];
+    const matches = rows.filter((r) => String(r[2] || "").trim() === String(chatId));
+    return matches
+      .reverse()
+      .slice(0, limit)
+      .map((r) => ({
+        txId: r[0] || "",
+        date: r[1] || "",
+        type: r[4] || "",
+        amount: Number(r[5] || 0),
+        balanceAfter: Number(r[6] || 0),
+        refId: r[7] || "",
+      }));
+  } catch (e) {
+    console.warn("getWalletTransactions: WalletTx tab not available —", e.message);
+    return [];
+  }
 }
