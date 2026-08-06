@@ -479,9 +479,17 @@ async function handleTopupVerify(query, pending) {
   await closeAdminMessage(query, "✅ Confirmed — awaiting amount");
   await bot.sendMessage(
     query.message.chat.id,
-    `💰 How much was it? Send the amount for ${pending.txId} (${pending.username}) as a number.\n` +
+    `💰 How much was it? Send the amount for <b>${esc(pending.txId)}</b> ` +
+      `(${customerMention(pending.username, pending.chatId)}) as a number.\n` +
       `Example: 15000`,
-    { reply_markup: { inline_keyboard: [[{ text: "✖️ Cancel this top-up", callback_data: `topupabort:${pending.txId}` }]] } }
+    {
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "✖️ Cancel this top-up", callback_data: `topupabort:${pending.txId}` }],
+        ],
+      },
+    }
   );
 }
 
@@ -517,8 +525,10 @@ async function finishTopupWithAmount(adminChatId, txId, amount) {
   );
   await bot.sendMessage(
     adminChatId,
-    `✅ Credited ${amount.toLocaleString()} MMK to ${pending.username}.\n` +
-      `New balance: ${newBalance.toLocaleString()} MMK (${pending.txId})`
+    `✅ Credited <b>${amount.toLocaleString()} MMK</b> to ` +
+      `${customerMention(pending.username, pending.chatId)}.\n` +
+      `New balance: <b>${newBalance.toLocaleString()} MMK</b> (${esc(pending.txId)})`,
+    { parse_mode: "HTML" }
   );
 }
 
@@ -579,6 +589,35 @@ async function handleFaq(chatId, arg) {
 
 function customerLabel(from) {
   return from.username ? `@${from.username}` : `${from.first_name || "User"} (id:${from.id})`;
+}
+
+/**
+ * A tappable reference to a customer, for messages sent to the admin.
+ *
+ * With a public @username we link to t.me/<username>. Without one — plenty of
+ * customers never set a username — we fall back to a tg://user?id= mention,
+ * which Telegram still renders as a tappable name. Either way the admin can
+ * open the chat from the notification instead of copying a raw id by hand.
+ *
+ * Returns HTML, so the message must be sent with parse_mode: "HTML".
+ */
+function customerMention(label, chatId) {
+  const m = /^@(\w+)/.exec((label || "").trim());
+  if (m) return `<a href="https://t.me/${m[1]}">@${esc(m[1])}</a>`;
+
+  const name = (label || "").replace(/\s*\(id:\d+\)\s*$/, "").trim() || "Customer";
+  return chatId ? `<a href="tg://user?id=${chatId}">${esc(name)}</a>` : esc(name);
+}
+
+/**
+ * An inline-keyboard row that opens the customer's chat, or null when they
+ * have no public username. Telegram only accepts http(s) links in url
+ * buttons, so the tg:// fallback above can't be used here — which is exactly
+ * why the message body carries a mention too.
+ */
+function customerButtonRow(label, text = "💬 Message customer") {
+  const url = customerUrl(label);
+  return url ? [{ text, url }] : null;
 }
 
 /** Parse a price/amount cell that might have stray commas or spaces
@@ -921,12 +960,18 @@ async function deliverManualOrder(base, product, adminId, meta) {
     dur ? `⏳ Duration: ${esc(dur)}` : null,
     `🏷 Option: ${esc(order.variant || "-")}`,
     `💰 Price: ${esc(order.price)} MMK`,
-    `👤 Customer: ${esc(order.customerUsername)}`,
+    `👤 Customer: ${customerMention(order.customerUsername, order.customerChatId)}`,
     `🕒 ${esc(meta.adminDecision)}: ${esc(meta.decisionTime)}`,
   ]
     .filter(Boolean)
     .join("\n");
-  if (adminId) await bot.sendMessage(adminId, adminCard, { parse_mode: "HTML" });
+  if (adminId) {
+    const contact = customerButtonRow(order.customerUsername);
+    await bot.sendMessage(adminId, adminCard, {
+      parse_mode: "HTML",
+      ...(contact ? { reply_markup: { inline_keyboard: [contact] } } : {}),
+    });
+  }
 
   // Customer button opens the admin chat directly (URL button, no bot ping).
   const s = await getSettings();
@@ -1104,7 +1149,7 @@ async function handleCanvaSend(query, orderId) {
       `📧 <b>Canva invite request</b>\n` +
         `🧾 Order: ${esc(order.orderId)}\n` +
         `📦 ${esc(order.productName)} (${esc(order.variant)})\n` +
-        `👤 Customer: ${esc(order.customerUsername)}\n` +
+        `👤 Customer: ${customerMention(order.customerUsername, order.customerChatId)}\n` +
         `✉️ Gmail: <code>${esc(st.email)}</code>`,
       { parse_mode: "HTML", reply_markup: { inline_keyboard: adminButtons } }
     );
@@ -1423,24 +1468,27 @@ bot.on("photo", async (msg) => {
     const s = await getSettings();
     const adminId = await resolveAdminChatId(s);
     const caption = [
-      `🧾 New payslip`,
-      `Order: ${pending.orderId}`,
-      `Product: ${pending.productName} (${pending.variant})`,
-      `Price: ${pending.price} MMK`,
-      `Customer: ${pending.customerUsername}`,
+      `🧾 <b>New payslip</b>`,
+      `Order: ${esc(pending.orderId)}`,
+      `Product: ${esc(pending.productName)} (${esc(pending.variant)})`,
+      `Price: ${esc(pending.price)} MMK`,
+      `Customer: ${customerMention(pending.customerUsername, pending.customerChatId)}`,
     ].join("\n");
 
     if (adminId) {
+      const rows = [
+        [
+          { text: "✅ Verified", callback_data: `verify:${pending.orderId}` },
+          { text: "❌ No Verify", callback_data: `noverify:${pending.orderId}` },
+        ],
+      ];
+      const contact = customerButtonRow(pending.customerUsername);
+      if (contact) rows.push(contact);
+
       await bot.sendPhoto(adminId, fileId, {
         caption,
-        reply_markup: {
-          inline_keyboard: [
-            [
-              { text: "✅ Verified", callback_data: `verify:${pending.orderId}` },
-              { text: "❌ No Verify", callback_data: `noverify:${pending.orderId}` },
-            ],
-          ],
-        },
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard: rows },
       });
     } else {
       console.warn(
@@ -1481,24 +1529,27 @@ async function handleTopupPhoto(msg) {
     // No amount line — the customer never declared one. The admin reads the
     // figure off the screenshot and types it after confirming.
     const caption = [
-      `👛 Wallet top-up request`,
-      `Ref: ${pending.txId}`,
-      `Customer: ${pending.username}`,
+      `👛 <b>Wallet top-up request</b>`,
+      `Ref: ${esc(pending.txId)}`,
+      `Customer: ${customerMention(pending.username, pending.chatId)}`,
       ``,
       `Confirm, then send the amount shown on the slip.`,
     ].join("\n");
 
     if (adminId) {
+      const rows = [
+        [
+          { text: "✅ Confirm", callback_data: `topupverify:${pending.txId}` },
+          { text: "❌ Decline", callback_data: `topupnoverify:${pending.txId}` },
+        ],
+      ];
+      const contact = customerButtonRow(pending.username);
+      if (contact) rows.push(contact);
+
       await bot.sendPhoto(adminId, fileId, {
         caption,
-        reply_markup: {
-          inline_keyboard: [
-            [
-              { text: "✅ Confirm", callback_data: `topupverify:${pending.txId}` },
-              { text: "❌ Decline", callback_data: `topupnoverify:${pending.txId}` },
-            ],
-          ],
-        },
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard: rows },
       });
     } else {
       console.warn(
