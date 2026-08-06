@@ -471,9 +471,44 @@ export async function markInventorySold(rowNumber, { soldTo, orderId }) {
   invalidate("inventory"); // stock just changed — don't show the old count
 }
 
+// ─── Narrow reads ────────────────────────────────────────────────────────────
+// Orders and WalletTx grow forever — roughly 400 new order rows a month here.
+// Pulling the whole tab to find one customer's last 10 orders means the read
+// gets steadily heavier every month for a result that never changes size.
+//
+// Instead: scan ONE narrow column (chat id, or order id) to work out which row
+// numbers we actually want, then fetch just those rows. A single column is
+// ~17x lighter than 17 columns, and the second call is a handful of rows, so
+// the cost stays roughly flat as the sheet grows.
+//
+// This stays exact — no "only look at recent rows" window that would quietly
+// hide a returning customer's older orders.
+
+/** One column as trimmed strings, index 0 = sheet row 2. */
+async function readColumn(range) {
+  const res = await sheets.spreadsheets.values.get({ spreadsheetId, range });
+  return (res.data.values || []).map((r) => String(r[0] || "").trim());
+}
+
+/** Specific row numbers as full rows, fetched in a single batch call. */
+async function readRows(tab, rowNumbers, lastCol) {
+  if (rowNumbers.length === 0) return [];
+  const res = await sheets.spreadsheets.values.batchGet({
+    spreadsheetId,
+    ranges: rowNumbers.map((n) => `${tab}!A${n}:${lastCol}${n}`),
+  });
+  return (res.data.valueRanges || []).map((vr, i) => ({
+    rowNumber: rowNumbers[i],
+    values: (vr.values && vr.values[0]) || [],
+  }));
+}
+
 // ─── Orders ──────────────────────────────────────────────────────────────────
 
-/** Highest existing Order number in the sheet (0 when none). */
+/** Highest existing Order number in the sheet (0 when none).
+ *  Reads column A only — the one remaining full-column scan, kept exact
+ *  because a duplicated Order ID would be far worse than a slightly heavier
+ *  read, and it is still ~17x lighter than pulling every column. */
 export async function getMaxOrderNumber() {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId,
@@ -575,18 +610,15 @@ function rowToOrder(r, rowNumber) {
  * `limit` caps how many are returned (default 10).
  */
 export async function getOrdersByChatId(chatId, limit = 10) {
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId,
-    range: "Orders!A2:Q",
-  });
-  const rows = res.data.values || [];
-  const matches = [];
-  rows.forEach((r, i) => {
-    if (String(r[3] || "").trim() === String(chatId)) {
-      matches.push(rowToOrder(r, i + 2));
-    }
-  });
-  return matches.reverse().slice(0, limit); // newest first
+  // Column D is the customer chat id. Walk it from the bottom so the newest
+  // orders are found first and we can stop as soon as we have `limit` of them.
+  const ids = await readColumn("Orders!D2:D");
+  const wanted = [];
+  for (let i = ids.length - 1; i >= 0 && wanted.length < limit; i--) {
+    if (ids[i] === String(chatId)) wanted.push(i + 2);
+  }
+  const rows = await readRows("Orders", wanted, "Q");
+  return rows.map((r) => rowToOrder(r.values, r.rowNumber)); // already newest first
 }
 
 /**
@@ -608,16 +640,18 @@ export async function getAllCustomerChatIds() {
   return [...set];
 }
 
-/** Find an order by Order ID. Returns an object with rowNumber, or null. */
+/** Find an order by Order ID. Returns an object with rowNumber, or null.
+ *  Searches column A from the bottom: the orders being acted on are almost
+ *  always recent ones, so the match is usually found immediately. */
 export async function getOrderByOrderId(orderId) {
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId,
-    range: "Orders!A2:Q",
-  });
-  const rows = res.data.values || [];
-  const i = rows.findIndex((r) => (r[0] || "").trim() === orderId);
-  if (i === -1) return null;
-  return rowToOrder(rows[i], i + 2);
+  const ids = await readColumn("Orders!A2:A");
+  for (let i = ids.length - 1; i >= 0; i--) {
+    if (ids[i] === orderId) {
+      const [row] = await readRows("Orders", [i + 2], "Q");
+      return row ? rowToOrder(row.values, row.rowNumber) : null;
+    }
+  }
+  return null;
 }
 
 /**
@@ -721,22 +755,19 @@ export function ensureWalletTabs() {
  *  Wallets tab isn't there yet is fine; a purchase silently failing is not. */
 async function findWalletRow(chatId) {
   try {
-    const res = await sheets.spreadsheets.values.get({
-      spreadsheetId,
-      range: "Wallets!A2:D",
-    });
-    const rows = res.data.values || [];
-    for (let i = 0; i < rows.length; i++) {
-      if (String(rows[i][0] || "").trim() === String(chatId)) {
-        return {
-          rowNumber: i + 2,
-          chatId: (rows[i][0] || "").trim(),
-          username: rows[i][1] || "",
-          balance: Number(rows[i][2] || 0),
-        };
-      }
-    }
-    return null;
+    // Column A holds the chat ids — scan that, then pull only the one row.
+    const ids = await readColumn("Wallets!A2:A");
+    const i = ids.indexOf(String(chatId));
+    if (i === -1) return null;
+
+    const [row] = await readRows("Wallets", [i + 2], "D");
+    if (!row) return null;
+    return {
+      rowNumber: row.rowNumber,
+      chatId: String(row.values[0] || "").trim(),
+      username: row.values[1] || "",
+      balance: Number(row.values[2] || 0),
+    };
   } catch (e) {
     console.warn("findWalletRow: Wallets tab not available —", e.message);
     return null;
@@ -863,23 +894,22 @@ export async function chargeWallet({ chatId, username, amount, orderId }) {
  *  (not a thrown error) if the WalletTx tab isn't there yet. */
 export async function getWalletTransactions(chatId, limit = 5) {
   try {
-    const res = await sheets.spreadsheets.values.get({
-      spreadsheetId,
-      range: "WalletTx!A2:I",
-    });
-    const rows = res.data.values || [];
-    const matches = rows.filter((r) => String(r[2] || "").trim() === String(chatId));
-    return matches
-      .reverse()
-      .slice(0, limit)
-      .map((r) => ({
-        txId: r[0] || "",
-        date: r[1] || "",
-        type: r[4] || "",
-        amount: Number(r[5] || 0),
-        balanceAfter: Number(r[6] || 0),
-        refId: r[7] || "",
-      }));
+    // Column C is the chat id. Same bottom-up scan as order history: the
+    // ledger only ever grows, but the answer is always the newest few rows.
+    const ids = await readColumn("WalletTx!C2:C");
+    const wanted = [];
+    for (let i = ids.length - 1; i >= 0 && wanted.length < limit; i--) {
+      if (ids[i] === String(chatId)) wanted.push(i + 2);
+    }
+    const rows = await readRows("WalletTx", wanted, "I");
+    return rows.map(({ values: r }) => ({
+      txId: r[0] || "",
+      date: r[1] || "",
+      type: r[4] || "",
+      amount: Number(r[5] || 0),
+      balanceAfter: Number(r[6] || 0),
+      refId: r[7] || "",
+    }));
   } catch (e) {
     console.warn("getWalletTransactions: WalletTx tab not available —", e.message);
     return [];
