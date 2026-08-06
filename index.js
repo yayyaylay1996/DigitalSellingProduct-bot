@@ -29,6 +29,8 @@ import {
   chargeWallet,
   getWalletTransactions,
   ensureWalletTabs,
+  expiryFor,
+  ensureOrderExpiryColumn,
 } from "./sheets.js";
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -935,6 +937,11 @@ async function closeAdminText(query, statusLabel) {
  *  the bank-transfer Verify path and the instant Wallet-payment path so a
  *  change to delivery logic only has to happen once. */
 async function deliverAutoOrder(base, product, inv, adminId, meta) {
+  // The subscription clock starts the moment the account is handed over, so
+  // expiry is computed from the delivery timestamp — the same value written to
+  // the sheet and shown on the card, so the three can never disagree.
+  const expiryDate = expiryFor(meta.decisionTime, product && product.duration);
+
   const orderId = await createOrder({
     ...base,
     paymentStatus: meta.paymentStatus,
@@ -945,6 +952,7 @@ async function deliverAutoOrder(base, product, inv, adminId, meta) {
     inventoryIdUsed: inv.inventoryId,
     credentialsSent: inv.credentials,
     usedDateTime: meta.decisionTime,
+    expiryDate,
   });
 
   // Polished delivery card + per-product tips (Name|Variant → Name → Type).
@@ -970,6 +978,7 @@ async function deliverAutoOrder(base, product, inv, adminId, meta) {
     `🕒 <b>စတင်ချိန်</b>`,
     `${esc(meta.decisionTime)}`,
     product && product.duration ? `⏳ သက်တမ်း — ${esc(product.duration)}` : null,
+    expiryDate ? `📅 <b>ကုန်ဆုံးရက်</b> — ${esc(expiryDate)}` : null,
   ].filter((l) => l !== null);
   if (tips) card.push(``, `💡 <b>အကြံပြုချက်</b>`, `<blockquote>${esc(tips)}</blockquote>`);
   card.push(``, `🙏 ဝယ်ယူအားပေးမှုအတွက် ကျေးဇူးတင်ပါတယ်!`);
@@ -996,6 +1005,12 @@ async function deliverAutoOrder(base, product, inv, adminId, meta) {
  *  points the customer at the admin. Shared the same way as deliverAutoOrder
  *  above. */
 async function deliverManualOrder(base, product, adminId, meta) {
+  // Manual products aren't active yet — the admin still has to set them up —
+  // but recording a provisional expiry from the payment time is far better
+  // than leaving it blank and losing the customer from every renewal report.
+  // Adjust the cell by hand if activation ends up being much later.
+  const expiryDate = expiryFor(meta.decisionTime, product && product.duration);
+
   const orderId = await createOrder({
     ...base,
     paymentStatus: meta.paymentStatus,
@@ -1003,6 +1018,7 @@ async function deliverManualOrder(base, product, adminId, meta) {
     adminDecision: meta.adminDecision,
     decisionTime: meta.decisionTime,
     deliveryStatus: "Awaiting Admin Contact",
+    expiryDate,
   });
   const order = { ...base, orderId };
 
@@ -1639,5 +1655,11 @@ warmCache().then(() => console.log("📦 Sheet cache warmed"));
 ensureWalletTabs()
   .then(() => console.log("👛 Wallet tabs ready"))
   .catch((e) => console.error("⚠️ Wallet tabs unavailable:", e.message));
+
+// Same idea for the Orders expiry column — add the header now rather than
+// discovering it missing on the first sale after a deploy.
+ensureOrderExpiryColumn()
+  .then(() => console.log("📅 Expiry column ready"))
+  .catch((e) => console.error("⚠️ Expiry column unavailable:", e.message));
 
 console.log("🤖 Bot is running...");

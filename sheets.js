@@ -148,6 +148,7 @@ const ORDER_COLS = {
   credentialsSent: "O",
   usedDateTime: "P",
   notes: "Q",
+  expiryDate: "R",
 };
 
 /** "YYYY-MM-DD HH:MM" in local time, matching the existing sheet format. */
@@ -158,6 +159,93 @@ export function now() {
     `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
     `${pad(d.getHours())}:${pad(d.getMinutes())}`
   );
+}
+
+// ─── Duration & expiry ───────────────────────────────────────────────────────
+// The Duration column is free text a human types — "6 Month", "6Month",
+// "1 Year", "30 Days" have all appeared. Nothing downstream (renewal
+// reminders, a dashboard, churn tracking) can work until that becomes a real
+// date, so parsing is deliberately forgiving about spacing, case, plurals and
+// common abbreviations, and returns null rather than guessing when it can't
+// tell — a wrong expiry date is worse than a missing one.
+
+/** "6 Month" → { months: 6 }.  "30 days" → { days: 30 }.  null if unparseable. */
+export function parseDuration(raw) {
+  const t = String(raw || "").toLowerCase().trim();
+  if (!t) return null;
+
+  const m = /(\d+)\s*(days?|d|weeks?|w|months?|mons?|m|years?|yrs?|y)\b/.exec(t);
+  if (!m) return null;
+
+  const n = parseInt(m[1], 10);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const unit = m[2];
+
+  if (/^d(ays?)?$/.test(unit)) return { days: n };
+  if (/^w(eeks?)?$/.test(unit)) return { days: n * 7 };
+  if (/^(m|mons?|months?)$/.test(unit)) return { months: n };
+  if (/^(y|yrs?|years?)$/.test(unit)) return { months: n * 12 };
+  return null;
+}
+
+/** Parse the "YYYY-MM-DD HH:MM" format used throughout the sheet.
+ *
+ *  Rejects dates that don't exist rather than letting them roll over: given
+ *  "2026-02-29" (2026 is not a leap year) the Date constructor happily returns
+ *  1 March, which would produce a confident but wrong expiry a year later.
+ *  Better to return null and leave expiry blank than to invent a date. */
+function parseSheetDate(s) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}))?/.exec(String(s || "").trim());
+  if (!m) return null;
+
+  const [y, mo, day] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const d = new Date(y, mo - 1, day, Number(m[4] || 0), Number(m[5] || 0));
+  if (isNaN(d.getTime())) return null;
+
+  // If any component changed, the input named a day that doesn't exist.
+  if (d.getFullYear() !== y || d.getMonth() !== mo - 1 || d.getDate() !== day) return null;
+  return d;
+}
+
+function formatSheetDate(d) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return (
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+    `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  );
+}
+
+/**
+ * Add a parsed duration to a sheet date string. Returns "" when either input
+ * is unusable, so a product with a blank or odd Duration simply gets no expiry
+ * instead of a nonsense one.
+ *
+ * Month arithmetic clamps to the end of the target month: 31 Jan + 1 month is
+ * 28 Feb, not 3 Mar. JavaScript's setMonth rolls over by default, which would
+ * silently hand customers extra days every time they bought at month end.
+ */
+export function addDuration(startStr, duration) {
+  const start = parseSheetDate(startStr);
+  if (!start || !duration) return "";
+
+  const d = new Date(start.getTime());
+  if (duration.days) {
+    d.setDate(d.getDate() + duration.days);
+  } else if (duration.months) {
+    const targetDay = d.getDate();
+    d.setDate(1); // avoid rollover while changing month
+    d.setMonth(d.getMonth() + duration.months);
+    const lastDayOfTarget = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+    d.setDate(Math.min(targetDay, lastDayOfTarget));
+  } else {
+    return "";
+  }
+  return formatSheetDate(d);
+}
+
+/** Expiry for an order delivered at `startStr` for a product with `durationText`. */
+export function expiryFor(startStr, durationText) {
+  return addDuration(startStr, parseDuration(durationText));
 }
 
 // ─── Settings ────────────────────────────────────────────────────────────────
@@ -551,6 +639,7 @@ export async function createOrder({
   credentialsSent = "",
   usedDateTime = "",
   notes = "",
+  expiryDate = "",
 }) {
   const id = orderId || (await nextOrderId());
   const row = [
@@ -571,14 +660,52 @@ export async function createOrder({
     credentialsSent, // O Credentials Sent
     usedDateTime, // P Used Date/Time
     notes, // Q Notes
+    expiryDate, // R Expiry Date
   ];
+  await ensureOrderExpiryColumn();
   await sheets.spreadsheets.values.append({
     spreadsheetId,
-    range: "Orders!A:Q",
+    range: "Orders!A:R",
     valueInputOption: "USER_ENTERED",
     requestBody: { values: [row] },
   });
   return id;
+}
+
+/**
+ * Make sure Orders has an "Expiry Date" header in column R.
+ *
+ * Same reasoning as ensureWalletTabs: requiring a manual sheet edit before a
+ * release works is a step that gets forgotten, and the failure shows up as a
+ * blank column nobody notices rather than a loud error. Cached after the first
+ * success so it costs one read at startup, not one per order.
+ */
+let expiryColumnReady = null;
+export function ensureOrderExpiryColumn() {
+  if (expiryColumnReady) return expiryColumnReady;
+
+  expiryColumnReady = (async () => {
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: "Orders!R1",
+    });
+    const existing = ((res.data.values || [])[0] || [])[0];
+    if (existing && String(existing).trim()) return true;
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: "Orders!R1",
+      valueInputOption: "RAW",
+      requestBody: { values: [["Expiry Date"]] },
+    });
+    console.log('✔ Added "Expiry Date" header to Orders!R1');
+    return true;
+  })().catch((e) => {
+    expiryColumnReady = null; // retry next time rather than caching a failure
+    throw e;
+  });
+
+  return expiryColumnReady;
 }
 
 /** Map a raw Orders sheet row (array) to an order object, given its row index. */
@@ -602,6 +729,7 @@ function rowToOrder(r, rowNumber) {
     credentialsSent: r[14] || "",
     usedDateTime: r[15] || "",
     notes: r[16] || "",
+    expiryDate: r[17] || "",
   };
 }
 
