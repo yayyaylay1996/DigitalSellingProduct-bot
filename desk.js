@@ -135,6 +135,51 @@ export function buildDeskRow({ no, order, product, seller = "Bot", zoomEmail = "
 }
 
 /**
+ * Fill in the Zoom Email cell for an order already on the Desk.
+ *
+ * Zoom customers give their email after the sale completes, so the row is
+ * written first with the cell blank and updated when the address arrives. The
+ * Desk's calendar reminder puts this address in the event description, which
+ * is how you know who to chase every 14 days — a blank cell there means a
+ * reminder you can't act on.
+ *
+ * Addressed by the Desk's own "No", found in column A. Never throws.
+ */
+export async function setZoomEmail(no, email) {
+  if (!deskEnabled()) return { ok: false, skipped: "DESK_SHEET_ID not set" };
+  if (!no || !email) return { ok: false, skipped: "missing order number or email" };
+
+  try {
+    const sheets = client();
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: DESK_ID,
+      range: "Orders!A2:A",
+    });
+    const rows = res.data.values || [];
+    // Search from the bottom: this always concerns a sale made moments ago.
+    let rowNumber = -1;
+    for (let i = rows.length - 1; i >= 0; i--) {
+      if (String(rows[i][0] || "").trim() === String(no)) {
+        rowNumber = i + 2;
+        break;
+      }
+    }
+    if (rowNumber === -1) return { ok: false, error: `Desk row No. ${no} not found` };
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: DESK_ID,
+      range: `Orders!N${rowNumber}`, // N = Zoom Email
+      valueInputOption: "USER_ENTERED",
+      requestBody: { values: [[email]] },
+    });
+    return { ok: true, rowNumber };
+  } catch (e) {
+    console.error("setZoomEmail:", e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+/**
  * Record a completed sale on the Desk. Never throws: returns a small result
  * object so the caller can tell the admin without interrupting delivery.
  */

@@ -32,7 +32,7 @@ import {
   expiryFor,
   ensureOrderExpiryColumn,
 } from "./sheets.js";
-import { pushOrderToDesk, deskEnabled } from "./desk.js";
+import { pushOrderToDesk, deskEnabled, setZoomEmail } from "./desk.js";
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 if (!token) {
@@ -957,7 +957,7 @@ async function recordOnDesk({ base, product, meta, expiryDate, adminId, zoomEmai
 
   if (result.ok || result.skipped) {
     if (result.skipped) console.warn(`Desk skipped: ${result.skipped}`);
-    return;
+    return result;
   }
 
   if (adminId) {
@@ -973,6 +973,7 @@ async function recordOnDesk({ base, product, meta, expiryDate, adminId, zoomEmai
       )
       .catch(() => {});
   }
+  return result;
 }
 
 /** Instant delivery for an "auto" (ready-stock) product: records the order,
@@ -1119,7 +1120,20 @@ async function deliverManualOrder(base, product, adminId, meta) {
     await bot.sendMessage(order.customerChatId, `${customerMsg}\n📞 ဖုန်း: ${s["Admin Contact Phone"] || "-"}`);
   }
 
-  await recordOnDesk({ base: { ...base, orderId }, product, meta, expiryDate, adminId });
+  const deskResult = await recordOnDesk({
+    base: { ...base, orderId },
+    product,
+    meta,
+    expiryDate,
+    adminId,
+  });
+
+  // Zoom needs the customer's email on the Desk row — the 14-day calendar
+  // reminder carries it, and a reminder without an address can't be acted on.
+  if (isZoom(product)) {
+    await startZoomEmailFlow(order, deskResult && deskResult.no);
+  }
+
   return orderId;
 }
 
@@ -1199,6 +1213,103 @@ async function handleContact(chatId) {
 // ─── Canva guided activation flow ────────────────────────────────────────────
 
 /** True when this order is for the Canva product (its own multi-step flow). */
+/** True for any Zoom plan — they all need the customer's email on the Desk. */
+function isZoom(product) {
+  return Boolean(product) && /zoom/i.test(product.name || "");
+}
+
+// Zoom email collection, keyed by String(customerChatId):
+//   { orderId, deskNo, email, invited }.
+// In memory like canvaState — a restart mid-flow loses it, and the admin then
+// fills the Zoom Email cell on the Desk by hand. Same trade-off as Canva.
+const zoomState = new Map();
+
+/** Ask a Zoom buyer for the address to invite. */
+async function startZoomEmailFlow(order, deskNo) {
+  const chatId = String(order.customerChatId);
+  zoomState.set(chatId, { orderId: order.orderId, deskNo, email: null, invited: false });
+
+  await bot.sendMessage(
+    order.customerChatId,
+    `✅ <b>ငွေလက်ခံရရှိပါပြီ</b>\n\n` +
+      `Zoom invite ပို့ရန် သင့် <b>email လိပ်စာ</b> ကို ရိုက်ပို့ပေးပါ 📧\n\n` +
+      `<i>စာလုံးပေါင်း မှားမှာစိုးလို့ သေချာစစ်ပြီးမှ ပို့ပေးပါနော် 🙏</i>`,
+    { parse_mode: "HTML" }
+  );
+}
+
+/** Customer sent their Zoom email: store it on the Desk immediately, then ask
+ *  the admin to send the invite.
+ *
+ *  Written to the Desk on arrival rather than waiting for the admin to confirm
+ *  — if the invite step is forgotten, the address is still recorded and the
+ *  reminder still works. */
+async function handleZoomEmail(msg, email) {
+  const chatId = String(msg.chat.id);
+  const st = zoomState.get(chatId);
+  if (!st) return;
+
+  st.email = email;
+
+  const deskResult = await setZoomEmail(st.deskNo, email);
+  if (!deskResult.ok) {
+    console.warn(`Zoom email not written to Desk: ${deskResult.error || deskResult.skipped}`);
+  }
+
+  await bot.sendMessage(
+    msg.chat.id,
+    `✅ လက်ခံရရှိပါပြီ — <code>${esc(email)}</code>\n\nInvite ပို့ပေးပါမယ်၊ ခဏစောင့်ပေးပါနော် 🙏`,
+    { parse_mode: "HTML" }
+  );
+
+  const adminId = await resolveAdminChatId();
+  if (!adminId) {
+    console.warn(`No admin chat id; cannot forward Zoom email for ${st.orderId}.`);
+    return;
+  }
+
+  const rows = [[{ text: "✅ Invited", callback_data: `zoom_invited:${chatId}` }]];
+  const contact = customerButtonRow(msg.from.username ? `@${msg.from.username}` : "");
+  if (contact) rows.push(contact);
+
+  await bot.sendMessage(
+    adminId,
+    `📧 <b>Zoom invite needed</b>\n` +
+      `🧾 ${esc(st.orderId)}${st.deskNo ? ` · Desk No. ${esc(String(st.deskNo))}` : ""}\n` +
+      `👤 ${customerMention(customerLabel(msg.from), msg.chat.id)}\n` +
+      `✉️ <code>${esc(email)}</code>\n\n` +
+      (deskResult.ok
+        ? `<i>Saved to the Desk — the 14-day reminder will carry this address.</i>`
+        : `⚠️ <i>Could not save to the Desk. Add it to the Zoom Email cell by hand.</i>`) +
+      `\n\nSend the invite, then tap Invited.`,
+    { parse_mode: "HTML", reply_markup: { inline_keyboard: rows } }
+  );
+}
+
+/** Admin tapped Invited: tell the customer the invite is on its way. */
+async function handleZoomInvited(query, customerChatId) {
+  const st = zoomState.get(String(customerChatId));
+  if (!st) {
+    return bot.sendMessage(query.message.chat.id, "ℹ️ That Zoom invite was already handled.");
+  }
+  if (st.invited) {
+    return bot.sendMessage(query.message.chat.id, "ℹ️ Already marked as invited.");
+  }
+  st.invited = true;
+
+  await bot.sendMessage(
+    Number(customerChatId),
+    `📨 <b>Zoom invite ပို့ပြီးပါပြီ</b>\n\n` +
+      `<code>${esc(st.email || "")}</code> ရဲ့ inbox ကို စစ်ပေးပါ။\n` +
+      `Spam folder ထဲလည်း ရောက်နိုင်ပါတယ်နော် 🙏\n\n` +
+      `မရရင် Admin ကို အချိန်မရွေး ပြောပါ။`,
+    { parse_mode: "HTML" }
+  );
+
+  zoomState.delete(String(customerChatId));
+  await closeAdminMessage(query, "✅ Invited");
+}
+
 function isCanva(product) {
   return product && product.name.trim().toLowerCase() === "canva";
 }
@@ -1337,6 +1448,32 @@ bot.on("message", async (msg) => {
   await bot.sendMessage(msg.chat.id, `✅ လက်ခံရရှိပါပြီ: ${text}\n\nဆက်လက်ရန် 📧 Send Gmail Invite ကို နှိပ်ပေးပါ 👇`, {
     reply_markup: { inline_keyboard: rows },
   });
+});
+
+/** Capture a Zoom customer's typed email while they're in that flow. */
+bot.on("message", async (msg) => {
+  const chatId = String(msg.chat.id);
+  const st = zoomState.get(chatId);
+  if (!st || st.email) return; // not waiting, or already captured
+
+  const text = (msg.text || "").trim();
+  if (!text || text.startsWith("/")) return;
+  if (Object.values(BTN).includes(text)) return; // menu tap, not an email
+
+  const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRe.test(text)) {
+    return bot.sendMessage(
+      msg.chat.id,
+      "❌ မှန်ကန်တဲ့ email တစ်ခု ရိုက်ထည့်ပေးပါ (ဥပမာ - yourname@gmail.com)။"
+    );
+  }
+
+  try {
+    await handleZoomEmail(msg, text);
+  } catch (err) {
+    console.error("handleZoomEmail:", err.message);
+    bot.sendMessage(msg.chat.id, "⚠️ တစ်ခုခု မှားယွင်းသွားပါတယ်။ ထပ်မံကြိုးစားပေးပါ။");
+  }
 });
 
 /** Capture the amount the ADMIN types after confirming a top-up payslip. Only
@@ -1551,6 +1688,11 @@ bot.on("callback_query", async (query) => {
       }
       case "contact":
         return await handleContact(chatId);
+      case "zoom_invited": {
+        const adminId = await resolveAdminChatId();
+        if (!adminId || String(chatId) !== String(adminId)) return; // admin only
+        return await handleZoomInvited(query, arg);
+      }
       case "canva_send":
         return await handleCanvaSend(query, arg);
       case "canva_added":
