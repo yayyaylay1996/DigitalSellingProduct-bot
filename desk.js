@@ -56,6 +56,21 @@ export function deskEnabled() {
   return Boolean(DESK_ID);
 }
 
+/**
+ * Prices reach here as whatever the Products sheet holds — "95000", "95,000",
+ * sometimes with a stray space. Number("95,000") is NaN, and defaulting that
+ * to 0 writes a free sale into your revenue reports, which is worse than an
+ * obviously wrong value. So: strip the formatting, and if it still can't be
+ * read, pass the original text through so it's visible and fixable rather
+ * than silently zero.
+ */
+function toMoney(v) {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  const cleaned = String(v ?? "").replace(/[^\d.-]/g, "");
+  const n = Number(cleaned);
+  return Number.isFinite(n) && cleaned !== "" ? n : String(v ?? "");
+}
+
 /** "2026-08-06 18:42" → "06/08/2026", the format the Desk's Date column uses. */
 function toDeskDate(sheetDateTime) {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(sheetDateTime || "").trim());
@@ -120,7 +135,8 @@ export function buildDeskRow({ no, order, product, seller = "Bot", zoomEmail = "
     product.deskItem, // G  Item          must match Config exactly
     seller, // H  Seller Name
     "", // I  Supplier      the bot doesn't know this
-    Number(order.price) || 0, // J  Price
+    toMoney(order.price), // J  Price         the sell price
+
     toDeskAccess(product.variant), // K  Share/Private
     "Done", // L  Payment check  paid before we ever get here
     product.duration, // M  Duration      matches the Desk's list
