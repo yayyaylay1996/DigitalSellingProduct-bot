@@ -23,9 +23,22 @@
  *   2. Run catchUpReminders once by hand and accept the permission prompt.
  *   3. Triggers (clock icon) → Add Trigger:
  *        function: catchUpReminders
- *        event source: Time-driven → Day timer → 6am–7am
- *      Running before REMIND_HOUR means a sale made today still gets its
- *      series before the first reminder would fire.
+ *        event source: Time-driven → Minutes timer → Every 5 minutes
+ *
+ * WHY EVERY 5 MINUTES RATHER THAN INSTANTLY
+ * A Zoom sale can't have its reminder built at the moment of purchase: the
+ * bot has to ask the customer for their email first, and the calendar event
+ * carries that address. Creating the event at checkout would put "Email: —"
+ * on every Zoom reminder — the one field that makes it actionable.
+ *
+ * So the reminder has to wait for the email, which means polling. Five
+ * minutes is indistinguishable from instant for a 14-day cadence, and it
+ * needs no Calendar credentials in the bot and no second system able to
+ * create events (which would risk duplicates).
+ *
+ * Writes made by the Sheets API — which is how the bot adds rows — do not
+ * fire onEdit or onChange triggers, so a time-driven trigger is the only
+ * mechanism available here regardless.
  */
 
 /**
@@ -66,6 +79,10 @@ const CATCHUP_SELLER = 'Bot';
  */
 const CATCHUP_WINDOW_DAYS = 3;
 
+/** How many rows from the bottom of Orders to examine each run. Comfortably
+ *  more than three days of sales, while keeping a 5-minute trigger cheap. */
+const SCAN_ROWS = 400;
+
 /** Column F on the Orders tab. Code.gs doesn't name this one, so it's defined
  *  here rather than edited there. */
 const C_SOURCE_ = 6;
@@ -78,7 +95,13 @@ function catchUpReminders() {
   const lastRow = sh.getLastRow();
   if (lastRow < 2) return log_('no orders yet');
 
-  const values = sh.getRange(2, 1, lastRow - 1, 20).getValues();
+  // Running every few minutes means this must stay cheap. Only orders inside
+  // CATCHUP_WINDOW_DAYS can qualify, and orders are appended in time order, so
+  // reading the tail is enough — rescanning years of history on every run
+  // would burn the daily script-runtime quota for nothing.
+  const firstRow = Math.max(2, lastRow - SCAN_ROWS + 1);
+  const values = sh.getRange(firstRow, 1, lastRow - firstRow + 1, 20).getValues();
+  const rowOffset = firstRow;
   const remindItems = itemsNeedingReminder_();
   const cal = reminderCalendar_();
   const today = startOfToday_();
@@ -89,7 +112,10 @@ function catchUpReminders() {
 
   for (var i = 0; i < values.length; i++) {
     const row = values[i];
-    const rowNumber = i + 2;
+    // Offset by where the scan window started, not by 2 — reading a tail slice
+    // means index 0 is no longer sheet row 2, and getting this wrong would
+    // stamp the Reminder flag onto an unrelated order.
+    const rowNumber = i + rowOffset;
 
     if (!String(row[C_NO - 1] || '').trim()) continue;              // blank row
     if (isTrue_(row[C_REMINDER - 1])) continue;                     // already done
