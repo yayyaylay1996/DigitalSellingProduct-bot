@@ -28,11 +28,22 @@
  *      series before the first reminder would fire.
  */
 
-/** Calendar the reminders land on. Must be a calendar this script's owner can
- *  edit — if the owner is a different Google account, share it with them and
- *  give "Make changes to events". Falls back to the owner's default calendar
- *  so a mistyped address can't silently drop every reminder. */
-const REMINDER_CALENDAR_ID = 'goingforwardmyanmar@gmail.com';
+/**
+ * Calendar the reminders land on — the same one Code.gs already uses, since
+ * it's the script owner's own calendar. Left explicit rather than relying on
+ * getDefaultCalendar() so it stays obvious where reminders go, and so pointing
+ * them elsewhere later is a one-line change.
+ *
+ * If this is ever changed to another account's calendar, that calendar must be
+ * shared with the script owner with "Make changes to events". The lookup falls
+ * back to the default calendar and logs a warning rather than silently
+ * dropping every reminder.
+ *
+ * Reminders fire at REMIND_HOUR (08:00) Myanmar time — see TZ_MM in Code.gs.
+ * On a device set to Bangkok time that displays as 08:30, which is the same
+ * moment, not a different one.
+ */
+const REMINDER_CALENDAR_ID = 'yeemonmontin71@gmail.com';
 
 /**
  * Only rows recorded by this seller are touched.
