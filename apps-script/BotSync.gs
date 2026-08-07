@@ -34,10 +34,30 @@
  *  so a mistyped address can't silently drop every reminder. */
 const REMINDER_CALENDAR_ID = 'goingforwardmyanmar@gmail.com';
 
-/** Safety net: never create a series for an order older than this many days.
- *  Without it, switching this on would spam the calendar with reminders for
- *  every historical order at once. */
-const CATCHUP_MAX_AGE_DAYS = 90;
+/**
+ * Only rows recorded by this seller are touched.
+ *
+ * This is what keeps YOUR manual control intact. Orders entered through the
+ * dashboard already made their reminder decision at save time — if you untick
+ * the 14-day box, that must stay unticked. This script never looks at those
+ * rows, so it can't undo you. It only fills the gap for orders the bot wrote,
+ * which never passed through the form and so were never asked the question.
+ */
+const CATCHUP_SELLER = 'Bot';
+
+/**
+ * And only for a few days after the sale.
+ *
+ * After this window a row is left alone forever. So if you later untick the
+ * reminder on a bot order, tomorrow's run won't put it back — the decision
+ * becomes permanently yours. Also stops a first run from flooding the
+ * calendar with the whole back catalogue.
+ */
+const CATCHUP_WINDOW_DAYS = 3;
+
+/** Column F on the Orders tab. Code.gs doesn't name this one, so it's defined
+ *  here rather than edited there. */
+const C_SOURCE_ = 6;
 
 function catchUpReminders() {
   const ss = SpreadsheetApp.getActive();
@@ -51,7 +71,7 @@ function catchUpReminders() {
   const remindItems = itemsNeedingReminder_();
   const cal = reminderCalendar_();
   const today = startOfToday_();
-  const oldest = new Date(today.getTime() - CATCHUP_MAX_AGE_DAYS * 86400000);
+  const oldest = new Date(today.getTime() - CATCHUP_WINDOW_DAYS * 86400000);
 
   let created = 0, skipped = 0;
   const failures = [];
@@ -64,14 +84,19 @@ function catchUpReminders() {
     if (isTrue_(row[C_REMINDER - 1])) continue;                     // already done
     if (!isTrue_(row[C_TRACK - 1])) continue;                       // not tracked
 
+    // Dashboard-entered orders decided this themselves; never override them.
+    const seller = String(row[C_SELLER - 1] || '').trim();
+    if (seller.toLowerCase() !== CATCHUP_SELLER.toLowerCase()) continue;
+
     const item = String(row[C_ITEM - 1] || '').trim();
     if (remindItems.indexOf(item.toLowerCase()) === -1) continue;   // Zoom only
 
     const expiry = asDate_(row[C_EXPIRY - 1]);
     if (!expiry || expiry <= today) { skipped++; continue; }        // already lapsed
 
+    // Outside the window the row is yours to control — leave it alone.
     const purchased = asDate_(row[C_DATE - 1]);
-    if (purchased && purchased < oldest) { skipped++; continue; }   // too old
+    if (purchased && purchased < oldest) { skipped++; continue; }
 
     // Start today when the purchase date has passed, so Calendar isn't filled
     // with occurrences that already happened.
@@ -84,6 +109,7 @@ function catchUpReminders() {
         item: item,
         duration: String(row[C_DURATION - 1] || '').trim(),
         email: String(row[C_EMAIL - 1] || '').trim(),
+        source: String(row[C_SOURCE_ - 1] || '').trim(),
         start: seriesStart,
         until: expiry
       });
@@ -145,6 +171,9 @@ function createSeries_(cal, o) {
         'Order No. ' + o.no,
         'Customer: ' + o.customer,
         'Email: ' + (o.email || '—'),
+        // Where the customer came from, so you know whether to reply on
+        // Telegram, TikTok or Viber without opening the sheet.
+        'Source: ' + (o.source || '—'),
         'Plan: ' + o.item + ' · ' + o.duration,
         'Runs until: ' + untilStr
       ].join('\n') });
