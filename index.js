@@ -32,6 +32,7 @@ import {
   expiryFor,
   ensureOrderExpiryColumn,
 } from "./sheets.js";
+import { pushOrderToDesk, deskEnabled } from "./desk.js";
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 if (!token) {
@@ -930,6 +931,50 @@ async function closeAdminText(query, statusLabel) {
 
 // `pending` is the in-memory order (from Buy). On Verify we record it to the
 // sheet for the first time; on No Verify / Cancel it's dropped, never recorded.
+/**
+ * Record a completed sale on the Order Desk, which is the system of record
+ * across all sales channels.
+ *
+ * Deliberately fire-and-report: the customer has already paid and been served
+ * by the time this runs, so a Desk problem must never surface to them or roll
+ * anything back. The admin is told instead, because a sale missing from the
+ * Desk means a customer who will never appear in a renewal report — quiet, and
+ * expensive months later.
+ */
+async function recordOnDesk({ base, product, meta, expiryDate, adminId, zoomEmail }) {
+  if (!deskEnabled()) return;
+
+  const result = await pushOrderToDesk({
+    order: {
+      customerName: base.customerUsername,
+      dateTime: meta.decisionTime,
+      price: base.price,
+      expiry: expiryDate,
+    },
+    product,
+    zoomEmail,
+  });
+
+  if (result.ok || result.skipped) {
+    if (result.skipped) console.warn(`Desk skipped: ${result.skipped}`);
+    return;
+  }
+
+  if (adminId) {
+    await bot
+      .sendMessage(
+        adminId,
+        `⚠️ <b>Not recorded on the Order Desk</b>\n` +
+          `${esc(base.orderId)} — ${esc(base.productName)} · ${esc(base.customerUsername)}\n` +
+          `Reason: ${esc(result.error || "unknown")}\n\n` +
+          `The customer was served normally. Add this row to the Desk by hand ` +
+          `so they show up in Renewals.`,
+        { parse_mode: "HTML" }
+      )
+      .catch(() => {});
+  }
+}
+
 /** Instant delivery for an "auto" (ready-stock) product: records the order,
  *  sends the account credentials + tips, marks the inventory row Sold, and
  *  warns the admin if that was the last unit. `inv` must already be a
@@ -985,6 +1030,7 @@ async function deliverAutoOrder(base, product, inv, adminId, meta) {
   await bot.sendMessage(base.customerChatId, card.join("\n"), { parse_mode: "HTML" });
 
   await markInventorySold(inv.rowNumber, { soldTo: base.customerUsername, orderId });
+  await recordOnDesk({ base: { ...base, orderId }, product, meta, expiryDate, adminId });
 
   // Restock reminder: if that was the last available unit, ping the admin.
   const remaining = await countAvailableStock(product.id);
@@ -1072,6 +1118,8 @@ async function deliverManualOrder(base, product, adminId, meta) {
   } else {
     await bot.sendMessage(order.customerChatId, `${customerMsg}\n📞 ဖုန်း: ${s["Admin Contact Phone"] || "-"}`);
   }
+
+  await recordOnDesk({ base: { ...base, orderId }, product, meta, expiryDate, adminId });
   return orderId;
 }
 

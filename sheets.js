@@ -347,6 +347,9 @@ export function mapProductsFromValues(values) {
   const iIcon = find("icon");
   const iCategory = find("category");
   const iLogo = find("logo");
+  // What this product is called on the Order Desk. Blank means "don't send
+  // this one across" — see desk.js.
+  const iDeskItem = find("desk item");
   const g = (r, i) => (i > -1 ? r[i] || "" : "");
 
   return values
@@ -366,6 +369,7 @@ export function mapProductsFromValues(values) {
       icon: g(r, iIcon).trim(),
       category: g(r, iCategory).trim(),
       logo: g(r, iLogo).trim(),
+      deskItem: g(r, iDeskItem).trim(),
     }))
     .filter((p) => p.active.toLowerCase() !== "no");
 }
