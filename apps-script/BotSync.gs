@@ -113,8 +113,9 @@ function catchUpReminders() {
     // with occurrences that already happened.
     const seriesStart = (!purchased || purchased < today) ? today : purchased;
 
+    var series = null;
     try {
-      createSeries_(cal, {
+      series = createSeries_(cal, {
         no: row[C_NO - 1],
         customer: String(row[C_CUSTOMER - 1] || '').trim(),
         item: item,
@@ -124,10 +125,29 @@ function catchUpReminders() {
         start: seriesStart,
         until: expiry
       });
-      sh.getRange(rowNumber, C_REMINDER).setValue(true);
-      created++;
     } catch (err) {
       failures.push('row ' + rowNumber + ' (' + item + '): ' + err.message);
+      continue;
+    }
+
+    // Commit the flag immediately rather than letting Apps Script batch it to
+    // the end of the run. Spreadsheets occasionally times out on that final
+    // flush, and an uncommitted flag means tomorrow's run sees this row as
+    // still needing a reminder and creates a SECOND calendar series for the
+    // same order. Flushing here keeps the event and its flag together.
+    try {
+      sh.getRange(rowNumber, C_REMINDER).setValue(true);
+      SpreadsheetApp.flush();
+      created++;
+    } catch (err) {
+      // The event exists but the sheet doesn't know. Say so loudly and name
+      // the event, because the fix is manual: either tick Reminder on that row
+      // or delete the event before the next run duplicates it.
+      failures.push(
+        'row ' + rowNumber + ' (' + item + '): calendar series WAS created ("' +
+        series.getTitle() + '") but the Reminder flag could not be saved — ' +
+        'tick it by hand to avoid a duplicate tomorrow. ' + err.message
+      );
     }
   }
 
