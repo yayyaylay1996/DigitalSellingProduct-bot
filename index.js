@@ -852,16 +852,24 @@ async function handleBuyWallet(query, productId) {
 
   const s = await getSettings();
   const adminId = await resolveAdminChatId(s);
+
+  // Confirm the money BEFORE delivering. The deduction is the thing the
+  // customer just authorised, so it should be the next thing they read —
+  // sending it after the product flow left the receipt trailing behind an
+  // instruction to do something else, which reads as though the payment
+  // hadn't gone through.
+  await bot.sendMessage(
+    chatId,
+    `👛 <b>Wallet မှ ${esc(charged.toLocaleString())} MMK နုတ်ယူပြီးပါပြီ</b>\n` +
+      `လက်ကျန်: <b>${esc(newBalance.toLocaleString())} MMK</b>`,
+    { parse_mode: "HTML" }
+  );
+
   if (product.type === "auto") {
     await deliverAutoOrder(base, product, inv, adminId, meta);
   } else {
     await deliverManualOrder(base, product, adminId, meta);
   }
-
-  await bot.sendMessage(
-    chatId,
-    `👛 Wallet မှ ${charged.toLocaleString()} MMK နုတ်ယူပြီးပါပြီ။ လက်ကျန်: ${newBalance.toLocaleString()} MMK`
-  );
 }
 
 async function handleCancel(query, pendingId) {
@@ -1104,6 +1112,23 @@ async function deliverManualOrder(base, product, adminId, meta) {
     });
   }
 
+  const deskResult = await recordOnDesk({
+    base: { ...base, orderId },
+    product,
+    meta,
+    expiryDate,
+    adminId,
+  });
+
+  // Zoom has its own guided flow: the bot asks for the email it needs to put
+  // on the Desk row. Telling the customer to "contact admin" as well would
+  // give them two contradictory instructions in the same breath, so the
+  // generic hand-off below is skipped entirely — same as Canva.
+  if (isZoom(product)) {
+    await startZoomEmailFlow(order, deskResult && deskResult.no);
+    return orderId;
+  }
+
   // Customer button opens the admin chat directly (URL button, no bot ping).
   const s = await getSettings();
   const adminUser = (s["Admin Telegram Username"] || "").replace(/^@/, "");
@@ -1118,20 +1143,6 @@ async function deliverManualOrder(base, product, adminId, meta) {
     });
   } else {
     await bot.sendMessage(order.customerChatId, `${customerMsg}\n📞 ဖုန်း: ${s["Admin Contact Phone"] || "-"}`);
-  }
-
-  const deskResult = await recordOnDesk({
-    base: { ...base, orderId },
-    product,
-    meta,
-    expiryDate,
-    adminId,
-  });
-
-  // Zoom needs the customer's email on the Desk row — the 14-day calendar
-  // reminder carries it, and a reminder without an address can't be acted on.
-  if (isZoom(product)) {
-    await startZoomEmailFlow(order, deskResult && deskResult.no);
   }
 
   return orderId;
