@@ -32,7 +32,8 @@ import {
   expiryFor,
   ensureOrderExpiryColumn,
 } from "./sheets.js";
-import { pushOrderToDesk, deskEnabled, setZoomEmail } from "./desk.js";
+import { pushOrderToDesk, deskEnabled, setZoomEmail, markReminderDone } from "./desk.js";
+import { createZoomReminder, calendarEnabled } from "./calendar.js";
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 if (!token) {
@@ -1125,7 +1126,7 @@ async function deliverManualOrder(base, product, adminId, meta) {
   // give them two contradictory instructions in the same breath, so the
   // generic hand-off below is skipped entirely — same as Canva.
   if (isZoom(product)) {
-    await startZoomEmailFlow(order, deskResult && deskResult.no);
+    await startZoomEmailFlow(order, deskResult && deskResult.no, product, expiryDate);
     return orderId;
   }
 
@@ -1236,9 +1237,20 @@ function isZoom(product) {
 const zoomState = new Map();
 
 /** Ask a Zoom buyer for the address to invite. */
-async function startZoomEmailFlow(order, deskNo) {
+async function startZoomEmailFlow(order, deskNo, product, expiryDate) {
   const chatId = String(order.customerChatId);
-  zoomState.set(chatId, { orderId: order.orderId, deskNo, email: null, invited: false });
+  zoomState.set(chatId, {
+    orderId: order.orderId,
+    deskNo,
+    email: null,
+    invited: false,
+    // Held so the calendar series can be built the instant the email lands,
+    // without another round trip to the sheet.
+    item: (product && product.deskItem) || (product && product.name) || "",
+    duration: (product && product.duration) || "",
+    expiry: expiryDate || "",
+    customer: order.customerUsername || "",
+  });
 
   await bot.sendMessage(
     order.customerChatId,
@@ -1267,6 +1279,28 @@ async function handleZoomEmail(msg, email) {
     console.warn(`Zoom email not written to Desk: ${deskResult.error || deskResult.skipped}`);
   }
 
+  // The email was the last missing piece, so build the 14-day series now
+  // rather than waiting for the Apps Script sweep. Ticking Reminder on the
+  // Desk row afterwards is what stops that sweep creating a second one.
+  let cal = { ok: false, skipped: "calendar disabled" };
+  if (calendarEnabled()) {
+    cal = await createZoomReminder({
+      no: st.deskNo,
+      customer: st.customer || customerLabel(msg.from),
+      item: st.item,
+      duration: st.duration,
+      email,
+      source: "G-Tg",
+      startDate: now(),
+      expiry: st.expiry,
+    });
+    if (cal.ok) {
+      await markReminderDone(st.deskNo);
+    } else {
+      console.warn(`Zoom reminder not created: ${cal.error || cal.skipped}`);
+    }
+  }
+
   await bot.sendMessage(
     msg.chat.id,
     `✅ လက်ခံရရှိပါပြီ — <code>${esc(email)}</code>\n\nInvite ပို့ပေးပါမယ်၊ ခဏစောင့်ပေးပါနော် 🙏`,
@@ -1285,14 +1319,27 @@ async function handleZoomEmail(msg, email) {
 
   await bot.sendMessage(
     adminId,
-    `📧 <b>Zoom invite needed</b>\n` +
-      `🧾 ${esc(st.orderId)}${st.deskNo ? ` · Desk No. ${esc(String(st.deskNo))}` : ""}\n` +
-      `👤 ${customerMention(customerLabel(msg.from), msg.chat.id)}\n` +
-      `✉️ <code>${esc(email)}</code>\n\n` +
-      (deskResult.ok
-        ? `<i>Saved to the Desk — the 14-day reminder will carry this address.</i>`
-        : `⚠️ <i>Could not save to the Desk. Add it to the Zoom Email cell by hand.</i>`) +
-      `\n\nSend the invite, then tap Invited.`,
+    [
+      `📧 <b>Zoom invite needed</b>`,
+      ``,
+      `🧾 ${esc(st.orderId)}${st.deskNo ? ` · Desk No. ${esc(String(st.deskNo))}` : ""}`,
+      `👤 ${customerMention(customerLabel(msg.from), msg.chat.id)}`,
+      `✉️ <code>${esc(email)}</code>`,
+      `📲 Source — G-Tg (Telegram)`,
+      st.item ? `📦 ${esc(st.item)}${st.duration ? ` · ${esc(st.duration)}` : ""}` : null,
+      st.expiry ? `📅 ကုန်ဆုံးရက် — ${esc(String(st.expiry).slice(0, 10))}` : null,
+      ``,
+      deskResult.ok
+        ? `✅ Desk row updated`
+        : `⚠️ Desk not updated — add the email to the Zoom Email cell by hand`,
+      cal.ok
+        ? `✅ 14-day reminder added to your calendar`
+        : `⚠️ Reminder not added (${esc(cal.error || cal.skipped || "unknown")}) — the 5-minute sweep will retry`,
+      ``,
+      `Send the invite, then tap Invited.`,
+    ]
+      .filter((l) => l !== null)
+      .join("\n"),
     { parse_mode: "HTML", reply_markup: { inline_keyboard: rows } }
   );
 }

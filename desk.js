@@ -196,6 +196,44 @@ export async function setZoomEmail(no, email) {
 }
 
 /**
+ * Read back a few fields the reminder needs, and tick the Reminder flag.
+ *
+ * Ticking it is what stops the Apps Script safety-net trigger creating a
+ * second calendar series for an order the bot has already handled. The two
+ * systems coordinate through this one cell.
+ */
+export async function markReminderDone(no) {
+  if (!deskEnabled() || !no) return { ok: false, skipped: "no Desk row" };
+  try {
+    const sheets = client();
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: DESK_ID,
+      range: "Orders!A2:A",
+    });
+    const rows = res.data.values || [];
+    let rowNumber = -1;
+    for (let i = rows.length - 1; i >= 0; i--) {
+      if (String(rows[i][0] || "").trim() === String(no)) {
+        rowNumber = i + 2;
+        break;
+      }
+    }
+    if (rowNumber === -1) return { ok: false, error: `Desk row No. ${no} not found` };
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: DESK_ID,
+      range: `Orders!T${rowNumber}`, // T = Reminder
+      valueInputOption: "USER_ENTERED",
+      requestBody: { values: [[true]] },
+    });
+    return { ok: true, rowNumber };
+  } catch (e) {
+    console.error("markReminderDone:", e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+/**
  * Record a completed sale on the Desk. Never throws: returns a small result
  * object so the caller can tell the admin without interrupting delivery.
  */
