@@ -180,14 +180,23 @@ function logoTag(product) {
   return id ? `<tg-emoji emoji-id="${id}">${fallback}</tg-emoji>` : fallback;
 }
 
-/** Build one product button carrying its real logo on the icon slot. When a
- *  logo is present the Icon column's emoji is dropped from the label — showing
- *  both reads as a duplicate. */
+/** Build one product button carrying its real logo on the icon slot.
+ *
+ *  The Icon column's plain emoji stays in the label unless LOGO_ICON_ONLY=1.
+ *  That is deliberate: icon_custom_emoji_id is new (Bot API 9.4) and renders
+ *  nothing at all when the client or the bot's Premium status won't allow it —
+ *  no fallback, just an empty slot. Dropping the text emoji on the assumption
+ *  the logo will appear is how you end up with a menu of unlabelled buttons.
+ *  Once you can see the logos rendering, set LOGO_ICON_ONLY=1 for the compact
+ *  logo-only look. */
+const LOGO_ICON_ONLY = process.env.LOGO_ICON_ONLY === "1";
+
 function productButton(p, callbackData, label) {
   const id = logoEmojiId(p);
   const text = label !== undefined ? label : p.name;
+  const keepEmoji = p.icon && !(id && LOGO_ICON_ONLY);
   return {
-    text: id ? text : p.icon ? `${p.icon} ${text}` : text,
+    text: keepEmoji ? `${p.icon} ${text}` : text,
     callback_data: callbackData,
     ...(id ? { icon_custom_emoji_id: id } : {}),
   };
