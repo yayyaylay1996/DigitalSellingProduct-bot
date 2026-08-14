@@ -127,6 +127,72 @@ async function resolveAdminChatId(settings) {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FAQ_IMAGES_DIR = path.join(__dirname, "faq-images");
 
+// ─── Product logo custom emoji ───────────────────────────────────────────────
+// The real logos (CapCut, ChatGPT, Claude…) live in a custom emoji set this bot
+// owns — built by make-emoji-set.mjs, which writes the filename → id map in
+// logo-emoji.json. Bot API 9.4 renders those anywhere a plain emoji goes,
+// including the icon slot of an inline button, provided the account that owns
+// the bot in @BotFather has Telegram Premium.
+//
+// Everything below degrades quietly: no logo-emoji.json, or a product with no
+// matching logo, and the menu falls back to the Icon column's plain emoji
+// exactly as it did before.
+
+const LOGO_EMOJI = loadLogoEmoji();
+
+function loadLogoEmoji() {
+  try {
+    const map = JSON.parse(fs.readFileSync(path.join(__dirname, "logo-emoji.json"), "utf-8")).emoji || {};
+    console.log(`Loaded ${Object.keys(map).length} product logo emoji.`);
+    return map;
+  } catch {
+    console.log("No logo-emoji.json — menus will use the Icon column's plain emoji.");
+    return {};
+  }
+}
+
+/** The custom_emoji_id for a product's logo, or null. Matches the Products
+ *  sheet's Logo column with the extension dropped, so capcut.png, netflix.jpg
+ *  and canva.jpeg all resolve against the same tile names. Falls back to a slug
+ *  of the product name so a blank Logo cell still finds "Claude AI" → claude. */
+function logoEmojiId(product) {
+  const keys = [];
+  if (product.logo) keys.push(product.logo.replace(/\.[^.]+$/, "").toLowerCase());
+  if (product.name) {
+    const slug = product.name
+      .toLowerCase()
+      .replace(/\(.*?\)/g, "")          // drop "(SVIP)" and friends
+      .trim()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+    keys.push(slug, slug.split("-")[0]); // "outline-vpn-phone", then "outline"
+  }
+  for (const k of keys) if (k && LOGO_EMOJI[k]) return LOGO_EMOJI[k];
+  return null;
+}
+
+/** Inline-HTML logo for message text. The plain emoji inside the tag is what
+ *  Telegram shows on clients that can't render custom emoji, so the card never
+ *  ends up with a blank space where the logo should be. */
+function logoTag(product) {
+  const id = logoEmojiId(product);
+  const fallback = product.icon || "🛍";
+  return id ? `<tg-emoji emoji-id="${id}">${fallback}</tg-emoji>` : fallback;
+}
+
+/** Build one product button carrying its real logo on the icon slot. When a
+ *  logo is present the Icon column's emoji is dropped from the label — showing
+ *  both reads as a duplicate. */
+function productButton(p, callbackData, label) {
+  const id = logoEmojiId(p);
+  const text = label !== undefined ? label : p.name;
+  return {
+    text: id ? text : p.icon ? `${p.icon} ${text}` : text,
+    callback_data: callbackData,
+    ...(id ? { icon_custom_emoji_id: id } : {}),
+  };
+}
+
 // ─── Shared helpers ──────────────────────────────────────────────────────────
 
 /** Escape the few characters that matter when sending parse_mode "HTML". */
@@ -240,10 +306,7 @@ async function sendMainMenu(chatId) {
     keyboard.push([{ text: categoryHeading(cat), callback_data: "noop" }]); // heading row
     const items = groups.get(cat);
     for (let i = 0; i < items.length; i += 2) {
-      const row = items.slice(i, i + 2).map((p) => ({
-        text: p.icon ? `${p.icon} ${p.name}` : p.name,
-        callback_data: `name:${p.id}`,
-      }));
+      const row = items.slice(i, i + 2).map((p) => productButton(p, `name:${p.id}`));
       keyboard.push(row);
     }
   }
@@ -273,7 +336,7 @@ async function sendNameLevel(chatId, anchorId) {
 
   await bot.sendMessage(
     chatId,
-    `<b>${esc(anchor.name)}</b>\n\nMonth / Package ရွေးချယ်ပါ 👇`,
+    `${logoTag(anchor)} <b>${esc(anchor.name)}</b>\n\nMonth / Package ရွေးချယ်ပါ 👇`,
     { parse_mode: "HTML", reply_markup: { inline_keyboard: keyboard } }
   );
 }
@@ -291,7 +354,7 @@ async function sendDetailCard(chatId, productId) {
 
   // Title block: name and variant read as one unit, price on its own line so
   // it's the first thing the eye lands on after the name.
-  let text = `<b>${esc(product.name)}</b>`;
+  let text = `${logoTag(product)} <b>${esc(product.name)}</b>`;
   if (product.variant) text += `\n🏷 ${esc(product.variant)}`;
   let priceText = priceLine(product);
   if (product.duration) priceText += ` · ⏳ ${esc(product.duration)}`;
@@ -353,7 +416,7 @@ async function sendPromotions(chatId) {
   }
   const keyboard = promos.map((p) => {
     const label = p.variant ? `${p.name} — ${p.variant}` : p.name;
-    return [{ text: `${label} · ${priceTag(p)}`, callback_data: `detail:${p.id}` }];
+    return [productButton(p, `detail:${p.id}`, `${label} · ${priceTag(p)}`)];
   });
   keyboard.push([{ text: "🏠 ပင်မ Menu", callback_data: "menu" }]);
   await bot.sendMessage(chatId, "🎉 <b>ပရိုမိုးရှင်း</b>\n\nအထူးလျှော့ဈေးများ 👇", {
