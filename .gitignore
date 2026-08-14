@@ -11,3 +11,7 @@ DigitalShop_Import_Ready.xlsx
 # stray local files
 testfile.tmp
 photo_*.jpeg
+
+# local-only: secrets prepared for the host dashboard
+railway-env.txt
+railway-env-clean.txt

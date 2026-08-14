@@ -51,6 +51,42 @@ function die(msg) {
   process.exit(1);
 }
 
+/** Node's fetch throws a bare "fetch failed" for every transport problem, which
+ *  tells you nothing. Unwrap the cause so a DNS failure reads differently from
+ *  a timeout, and retry — reaching api.telegram.org over a flaky link or a VPN
+ *  fails intermittently far more often than it fails for good. */
+function netHint(err) {
+  const code = err?.cause?.code || err?.code || "";
+  const map = {
+    ENOTFOUND: "DNS could not resolve api.telegram.org — you are offline, or DNS is being blocked.",
+    EAI_AGAIN: "DNS lookup timed out — the connection is up but name resolution is failing.",
+    ECONNREFUSED: "The connection was refused — something is blocking Telegram.",
+    ECONNRESET: "The connection was cut mid-request — usually a flaky link or a VPN dropping.",
+    ETIMEDOUT: "The connection timed out — Telegram is unreachable from this network.",
+    UND_ERR_CONNECT_TIMEOUT: "Connecting timed out — Telegram is unreachable from this network.",
+    CERT_HAS_EXPIRED: "TLS certificate rejected — check your system clock or any proxy.",
+  };
+  return map[code] || (code ? `Network error (${code}).` : "Could not reach api.telegram.org.");
+}
+
+async function fetchRetry(url, opts, tries = 3) {
+  let last;
+  for (let i = 1; i <= tries; i++) {
+    try {
+      return await fetch(url, { ...opts, signal: AbortSignal.timeout(45000) });
+    } catch (e) {
+      last = e;
+      if (i < tries) {
+        console.log(`  … network attempt ${i}/${tries} failed, retrying in ${i * 3}s`);
+        await new Promise((r) => setTimeout(r, i * 3000));
+      }
+    }
+  }
+  const err = new Error(netHint(last));
+  err.isNetwork = true;
+  throw err;
+}
+
 /** One Bot API call. `files` is { fieldName: absolutePath } for multipart uploads. */
 async function call(method, params = {}, files = null) {
   let res;
@@ -60,12 +96,12 @@ async function call(method, params = {}, files = null) {
       form.append(k, typeof v === "object" ? JSON.stringify(v) : String(v));
     }
     for (const [field, filePath] of Object.entries(files)) {
-      form.append(field, new Blob([fs.readFileSync(filePath)], { type: "image/png" }),
-        path.basename(filePath));
+      const type = filePath.toLowerCase().endsWith(".webp") ? "image/webp" : "image/png";
+      form.append(field, new Blob([fs.readFileSync(filePath)], { type }), path.basename(filePath));
     }
-    res = await fetch(`${API}/${method}`, { method: "POST", body: form });
+    res = await fetchRetry(`${API}/${method}`, { method: "POST", body: form });
   } else {
-    res = await fetch(`${API}/${method}`, {
+    res = await fetchRetry(`${API}/${method}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(params),
@@ -86,10 +122,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function main() {
   // ── Which tiles are we publishing? ──────────────────────────────────────────
   if (!fs.existsSync(TILES_DIR)) die(`No emoji-logos/ folder at ${TILES_DIR}`);
-  const tiles = fs.readdirSync(TILES_DIR)
-    .filter((f) => f.toLowerCase().endsWith(".png"))
-    .sort();
-  if (tiles.length === 0) die("emoji-logos/ has no .png files.");
+  const all = fs.readdirSync(TILES_DIR);
+  // WEBP is Telegram's documented format for static custom emoji, so it wins
+  // whenever it's present. PNG stays supported for older tile folders.
+  const webp = all.filter((f) => f.toLowerCase().endsWith(".webp")).sort();
+  const tiles = webp.length ? webp : all.filter((f) => f.toLowerCase().endsWith(".png")).sort();
+  if (tiles.length === 0) die("emoji-logos/ has no .webp or .png files.");
+  console.log(`Format: ${webp.length ? "WEBP" : "PNG"}`);
 
   const me = await call("getMe");
   // Sticker set names are global and must end in _by_<botusername>.
@@ -236,5 +275,18 @@ async function main() {
 
 main().catch((e) => {
   console.error("\n✗ Failed:", e.description || e.message);
+  if (e.isNetwork) {
+    console.error(`
+  This never reached Telegram, so nothing was changed — the set and
+  logo-emoji.json are exactly as they were. Things worth checking:
+
+    • Is Telegram itself working right now on this Mac?
+    • If you use a VPN to reach Telegram, is it connected? Turn it on
+      (or off, if it is routing badly) and run the command again.
+    • Try:  curl -s -o /dev/null -w "%{http_code}\\n" https://api.telegram.org
+      200 or 302 means the network is fine and it is worth re-running.
+
+  The script is safe to re-run as many times as you like.`);
+  }
   process.exit(1);
 });
