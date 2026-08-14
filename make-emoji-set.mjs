@@ -42,8 +42,10 @@ const FALLBACK_EMOJI = {
   netflix: "🎬", "youtube-premium": "▶️", spotify: "🎵", "amazon-prime": "📺",
   chatgpt: "🤖", claude: "🧠", gemini: "✨", perplexity: "🔎", "super-grok": "🤖",
   quillbot: "✍️", capcut: "🎞️", canva: "🎨", meitu: "📸",
+  "alight-motion": "🎞️", wink: "🎞️", "elsa-speak-pro": "🗣️",
   zoom: "🎥", telegram: "✈️",
   outline: "🔒", "outline-vpn": "🔒", express: "🔒", windscribe: "🔒", happ: "🔒",
+  "jump-jump": "🔒",
 };
 
 function die(msg) {
