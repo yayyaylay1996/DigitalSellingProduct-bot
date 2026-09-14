@@ -779,7 +779,7 @@ export async function getOrderByOrderId(orderId) {
   const ids = await readColumn("Orders!A2:A");
   for (let i = ids.length - 1; i >= 0; i--) {
     if (ids[i] === orderId) {
-      const [row] = await readRows("Orders", [i + 2], "Q");
+      const [row] = await readRows("Orders", [i + 2], "R");
       return row ? rowToOrder(row.values, row.rowNumber) : null;
     }
   }

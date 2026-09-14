@@ -1159,7 +1159,7 @@ async function deliverManualOrder(base, product, adminId, meta) {
         { parse_mode: "HTML" }
       );
     }
-    await startCanvaFlow(order);
+    await startCanvaFlow(order, expiryDate);
     return orderId;
   }
 
@@ -1441,7 +1441,12 @@ async function handleZoomInvited(query, customerChatId) {
 }
 
 function isCanva(product) {
-  return product && product.name.trim().toLowerCase() === "canva";
+  // Every Canva plan runs the same guided activation, so match the family the
+  // way isZoom does rather than one exact name: "Canva", "Canva Pro" and
+  // "Canva Business" all qualify. The \b keeps unrelated names like
+  // "Canvas ..." out, and renaming a plan in the sheet no longer silently
+  // drops it back to the generic manual hand-off.
+  return Boolean(product) && /^canva\b/i.test((product.name || "").trim());
 }
 
 /** A https://t.me/<username> link for a customer, from the stored label
@@ -1451,7 +1456,31 @@ function customerUrl(label) {
   return m ? `https://t.me/${m[1]}` : null;
 }
 
-/** Today + 1 year as DD.MM.YYYY (e.g. 02.07.2027). */
+/** "2027-09-14 10:30" (sheet format) -> "14.09.2027". "" when unparseable. */
+function ddmmyyyy(sheetDate) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(sheetDate || "").trim());
+  return m ? `${m[3]}.${m[2]}.${m[1]}` : "";
+}
+
+/** The expiry to quote a Canva customer: the one already recorded for this
+ *  order, which deliverManualOrder derived from the product's Duration. Prefer
+ *  the in-memory copy; fall back to the sheet so a restart mid-flow still
+ *  quotes the right date, and only then to +1 year. */
+async function canvaExpiryText(chatId, orderId) {
+  const st = canvaState.get(String(chatId));
+  let raw = st && st.expiryDate;
+  if (!raw) {
+    try {
+      const order = await getOrderByOrderId(orderId);
+      raw = order && order.expiryDate;
+    } catch (err) {
+      console.warn(`Canva expiry lookup failed for ${orderId}: ${err.message}`);
+    }
+  }
+  return ddmmyyyy(raw) || expiryOneYear();
+}
+
+/** Today + 1 year as DD.MM.YYYY (e.g. 02.07.2027). Last-resort fallback. */
 function expiryOneYear() {
   const d = new Date();
   d.setFullYear(d.getFullYear() + 1);
@@ -1480,9 +1509,11 @@ const CANVA_MSG_D =
 const BTN_ADMIN_DIRECT = "💬 Admin နဲ့တိုက်ရိုက်ပြောမယ်";
 
 /** Step 1: after Verify, ask the customer for their Canva gmail. */
-async function startCanvaFlow(order) {
+async function startCanvaFlow(order, expiryDate) {
   const chatId = String(order.customerChatId);
-  canvaState.set(chatId, { orderId: order.orderId, email: null, sent: false });
+  // expiryDate rides along so the closing message can quote the term the
+  // customer actually bought (1 Year for Pro, 1 Month for Business).
+  canvaState.set(chatId, { orderId: order.orderId, email: null, sent: false, expiryDate });
   const s = await getSettings();
   const url = adminUrl(s);
   const rows = [[{ text: "📧 Send Gmail Invite", callback_data: `canva_send:${order.orderId}` }]];
@@ -1551,7 +1582,7 @@ async function handleCanvaAdded(query, orderId) {
 /** Step 4: customer tapped "OK" — send the final join instructions + expiry. */
 async function handleCanvaOk(query, orderId) {
   const chatId = query.message.chat.id;
-  await bot.sendMessage(chatId, `${CANVA_MSG_D}${expiryOneYear()}`, {
+  await bot.sendMessage(chatId, `${CANVA_MSG_D}${await canvaExpiryText(chatId, orderId)}`, {
     disable_web_page_preview: true,
   });
   await updateOrderByOrderId(orderId, { deliveryStatus: "Delivered" });
