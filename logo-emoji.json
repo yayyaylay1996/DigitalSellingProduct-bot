@@ -24,7 +24,8 @@
     "windscribe.webp",
     "wink.webp",
     "youtube-premium.webp",
-    "zoom.webp"
+    "zoom.webp",
+    "duolingo-super.webp"
   ],
   "emoji": {
     "alight-motion": "6339168190395851644",
@@ -50,7 +51,8 @@
     "windscribe": "6339187741086982341",
     "wink": "6339005041768145452",
     "youtube-premium": "6339305079593509786",
-    "zoom": "6338829953131356068"
+    "zoom": "6338829953131356068",
+    "duolingo-super": "6150046941968343853"
   },
-  "updated": "2026-08-14T14:04:26.656Z"
+  "updated": "2026-09-16T09:32:51.332Z"
 }
