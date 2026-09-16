@@ -46,6 +46,7 @@ const FALLBACK_EMOJI = {
   zoom: "🎥", telegram: "✈️",
   outline: "🔒", "outline-vpn": "🔒", express: "🔒", windscribe: "🔒", happ: "🔒",
   "jump-jump": "🔒",
+  "duolingo-super": "🦉",
 };
 
 function die(msg) {
