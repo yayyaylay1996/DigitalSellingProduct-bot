@@ -1150,20 +1150,24 @@ async function deliverManualOrder(base, product, adminId, meta) {
   });
   const order = { ...base, orderId };
 
-  // Canva has its own guided activation flow (email → invite → OK → expiry).
-  if (isCanva(product)) {
-    if (adminId) {
-      await bot.sendMessage(
-        adminId,
-        `🛠 ${esc(meta.adminDecision)} Canva order ${esc(orderId)} — starting the guided setup with the customer now.`,
-        { parse_mode: "HTML" }
-      );
-    }
-    await startCanvaFlow(order, expiryDate);
-    return orderId;
+  // Canva and Zoom each run their own guided activation after the sale, but
+  // both still belong on the Desk — a guided flow is no reason for a sale to
+  // be missing from Renewals. So all that differs here is which notice the
+  // admin gets; the recordOnDesk call below is shared by every path. Canva
+  // used to return early from this point, which is exactly why its sales
+  // stopped reaching the Desk.
+  const canva = isCanva(product);
+
+  if (canva && adminId) {
+    await bot.sendMessage(
+      adminId,
+      `🛠 ${esc(meta.adminDecision)} Canva order ${esc(orderId)} — starting the guided setup with the customer now.`,
+      { parse_mode: "HTML" }
+    );
   }
 
   // Send the admin a clear "to handle" card — Product, Duration, option, time.
+  // Canva's own notice above replaces it, so never send both.
   const dur = product && product.duration ? product.duration : "";
   const adminCard = [
     `🛠 <b>Manual order to set up</b>`,
@@ -1177,7 +1181,7 @@ async function deliverManualOrder(base, product, adminId, meta) {
   ]
     .filter(Boolean)
     .join("\n");
-  if (adminId) {
+  if (adminId && !canva) {
     const contact = customerButtonRow(order.customerUsername);
     await bot.sendMessage(adminId, adminCard, {
       parse_mode: "HTML",
@@ -1192,6 +1196,13 @@ async function deliverManualOrder(base, product, adminId, meta) {
     expiryDate,
     adminId,
   });
+
+  // Canva's guided flow (email → invite → OK → expiry), started only once the
+  // Desk row exists — same ordering as Zoom just below.
+  if (canva) {
+    await startCanvaFlow(order, expiryDate);
+    return orderId;
+  }
 
   // Zoom has its own guided flow: the bot asks for the email it needs to put
   // on the Desk row. Telling the customer to "contact admin" as well would
