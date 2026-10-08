@@ -280,10 +280,30 @@ function categoryHeading(cat) {
 
 // ─── Menu rendering ──────────────────────────────────────────────────────────
 
+/** Show a screen. When `editMsg` (the message whose button was tapped) is given,
+ *  that message is edited in place so Back / Main Menu swap the screen instead of
+ *  stacking a new message. Falls back to a fresh message if Telegram refuses the
+ *  edit (e.g. the old message was a photo). */
+async function showScreen(chatId, text, extra, editMsg) {
+  if (editMsg) {
+    try {
+      return await bot.editMessageText(text, {
+        chat_id: chatId,
+        message_id: editMsg.message_id,
+        ...extra,
+      });
+    } catch (err) {
+      if (/message is not modified/i.test(err.message || "")) return;
+      // otherwise fall through and send a new message
+    }
+  }
+  return bot.sendMessage(chatId, text, extra);
+}
+
 /** Main menu: products grouped under Category headings, two per row, each button
  *  prefixed with its Icon emoji. callback_data anchors on the first Product ID of
  *  each name group. A non-clickable header button ("noop") shows each category. */
-async function sendMainMenu(chatId) {
+async function sendMainMenu(chatId, editMsg) {
   const products = await getProducts();
   if (products.length === 0) {
     return bot.sendMessage(chatId, "လောလောဆယ် ကုန်ပစ္စည်း မရှိသေးပါ။ နောက်မှ ပြန်ကြည့်ပေးပါနော် 🙏");
@@ -320,39 +340,41 @@ async function sendMainMenu(chatId) {
     }
   }
 
-  await bot.sendMessage(
+  await showScreen(
     chatId,
     "🛒 <b>Going Forward Digital Shop</b>\n\nကုန်ပစ္စည်း ရွေးချယ်ပါ 👇",
-    { parse_mode: "HTML", reply_markup: { inline_keyboard: keyboard } }
+    { parse_mode: "HTML", reply_markup: { inline_keyboard: keyboard } },
+    editMsg
   );
 }
 
 /** Given any Product ID in a name group, show the variant list — or jump
  *  straight to the detail card if the name has only one variant. */
-async function sendNameLevel(chatId, anchorId) {
+async function sendNameLevel(chatId, anchorId, editMsg) {
   const products = await getProducts();
   const anchor = products.find((p) => p.id === anchorId);
   if (!anchor) return bot.sendMessage(chatId, "❌ ဒီကုန်ပစ္စည်းကို ရှာမတွေ့ပါ။");
 
   const group = products.filter((p) => p.name === anchor.name);
-  if (group.length === 1) return sendDetailCard(chatId, group[0].id);
+  if (group.length === 1) return sendDetailCard(chatId, group[0].id, editMsg);
 
   const keyboard = group.map((p) => [
     { text: `${p.variant} — ${priceTag(p)}`, callback_data: `detail:${p.id}` },
   ]);
   for (const row of await faqButtonRows(anchor, "name")) keyboard.push(row);
-  keyboard.push([{ text: "🏠 ပင်မ Menu", callback_data: "menu" }]);
+  keyboard.push([{ text: "⬅️ နောက်သို့", callback_data: "menu" }]);
 
-  await bot.sendMessage(
+  await showScreen(
     chatId,
     `${logoTag(anchor)} <b>${esc(anchor.name)}</b>\n\nMonth / Package ရွေးချယ်ပါ 👇`,
-    { parse_mode: "HTML", reply_markup: { inline_keyboard: keyboard } }
+    { parse_mode: "HTML", reply_markup: { inline_keyboard: keyboard } },
+    editMsg
   );
 }
 
 /** Detail card for one Product ID. Shows live stock for ready products; email
  *  products show no stock number and always allow Buy now. */
-async function sendDetailCard(chatId, productId) {
+async function sendDetailCard(chatId, productId, editMsg) {
   const products = await getProducts();
   const product = products.find((p) => p.id === productId);
   if (!product) return bot.sendMessage(chatId, "❌ ဒီကုန်ပစ္စည်းကို ရှာမတွေ့ပါ။");
@@ -407,10 +429,12 @@ async function sendDetailCard(chatId, productId) {
     { text: "🏠 ပင်မ Menu", callback_data: "menu" },
   ]);
 
-  await bot.sendMessage(chatId, text, {
-    parse_mode: "HTML",
-    reply_markup: { inline_keyboard: keyboard },
-  });
+  await showScreen(
+    chatId,
+    text,
+    { parse_mode: "HTML", reply_markup: { inline_keyboard: keyboard } },
+    editMsg
+  );
 }
 
 // ─── Promotions menu ─────────────────────────────────────────────────────────
@@ -1810,11 +1834,11 @@ bot.on("callback_query", async (query) => {
   try {
     switch (action) {
       case "menu":
-        return await sendMainMenu(chatId);
+        return await sendMainMenu(chatId, query.message);
       case "name":
-        return await sendNameLevel(chatId, arg);
+        return await sendNameLevel(chatId, arg, query.message);
       case "detail":
-        return await sendDetailCard(chatId, arg);
+        return await sendDetailCard(chatId, arg, query.message);
       case "faq":
         return await handleFaq(chatId, arg);
       case "buy":
