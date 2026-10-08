@@ -266,10 +266,10 @@ function mainKeyboard() {
 }
 
 // ─── Category headings ───────────────────────────────────────────────────────
-// Telegram gives no control over inline-button colours — they follow the
-// customer's own theme, so any per-category colour has to live in the button
-// text itself. A coloured square there read as clutter rather than helping,
-// so headings are now just a plain framed name.
+// Telegram lets a bot colour an inline button only via `style` (primary=blue,
+// success=green, danger=red); there is no per-category colour and no control
+// over button height. Headings use "primary" (blue) so they stand apart from the
+// product buttons, which keep the customer's default theme colour.
 
 /** Heading row text, e.g. "── Netflix ──". The rules shrink as the name grows
  *  so the row never wraps onto a second line on a narrow phone. */
@@ -312,7 +312,7 @@ async function sendMainMenu(chatId) {
 
   const keyboard = [];
   for (const cat of order) {
-    keyboard.push([{ text: categoryHeading(cat), callback_data: "noop" }]); // heading row
+    keyboard.push([{ text: categoryHeading(cat), callback_data: "noop", style: "primary" }]); // heading row (blue so it stands out from products)
     const items = groups.get(cat);
     for (let i = 0; i < items.length; i += 2) {
       const row = items.slice(i, i + 2).map((p) => productButton(p, `name:${p.id}`));
