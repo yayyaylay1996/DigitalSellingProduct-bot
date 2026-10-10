@@ -1047,3 +1047,84 @@ export async function getWalletTransactions(chatId, limit = 5) {
     return [];
   }
 }
+
+// ─── Slips ledger (payment-slip checker) ─────────────────────────────────────
+// One row per payment slip the bot has read, keyed by the slip's own transaction
+// number. This is what lets the checker say "this exact slip was already used
+// on another order" — it has to live in the sheet, not in memory, or a restart
+// would forget every slip and let an old one through again.
+// Values are written RAW so a 20-digit transaction number stays text instead of
+// being turned into a rounded number (and so nothing can be read as a formula).
+
+const SLIP_HEADERS = [
+  "Txn ID", "Seen At", "Provider", "Amount", "Slip Time",
+  "Receiver", "Ref (Order/Top-up)", "Customer", "Check Result", "Fingerprint",
+];
+
+let slipsTabReady = null;
+export function ensureSlipsTab() {
+  if (slipsTabReady) return slipsTabReady;
+  slipsTabReady = (async () => {
+    const meta = await sheets.spreadsheets.get({ spreadsheetId, fields: "sheets.properties.title" });
+    const existing = new Set((meta.data.sheets || []).map((s) => s.properties.title));
+    if (existing.has("Slips")) return true;
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: { requests: [{ addSheet: { properties: { title: "Slips" } } }] },
+    });
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: "Slips!A1",
+      valueInputOption: "RAW",
+      requestBody: { values: [SLIP_HEADERS] },
+    });
+    console.log('✔ Created missing "Slips" tab');
+    return true;
+  })().catch((e) => {
+    slipsTabReady = null; // let a later call retry rather than caching failure
+    throw e;
+  });
+  return slipsTabReady;
+}
+
+/** Every earlier row for this transaction number (normally zero or one). */
+export async function findSlipsByTxn(txnKey) {
+  await ensureSlipsTab();
+  const res = await sheets.spreadsheets.values.get({ spreadsheetId, range: "Slips!A2:J" });
+  const rows = res.data.values || [];
+  return rows
+    .filter((r) => String(r[0] || "").trim().toUpperCase() === txnKey)
+    .map((r) => ({
+      txnId: r[0], seenAt: r[1] || "", provider: r[2] || "", amount: r[3] || "",
+      slipTime: r[4] || "", receiver: r[5] || "", ref: r[6] || "",
+      customer: r[7] || "", result: r[8] || "",
+    }));
+}
+
+/** Earlier rows with the same amount + time + receiver fingerprint (any transaction number). */
+export async function findSlipsByFingerprint(fpKey) {
+  await ensureSlipsTab();
+  const res = await sheets.spreadsheets.values.get({ spreadsheetId, range: "Slips!A2:J" });
+  return (res.data.values || [])
+    .filter((r) => String(r[9] || "").trim() === fpKey)
+    .map((r) => ({
+      txnId: r[0], seenAt: r[1] || "", provider: r[2] || "", amount: r[3] || "",
+      slipTime: r[4] || "", receiver: r[5] || "", ref: r[6] || "",
+      customer: r[7] || "", result: r[8] || "",
+    }));
+}
+
+export async function appendSlipRow({ txnKey, provider, amount, slipTime, receiver, ref, customer, result, fingerprint }) {
+  await ensureSlipsTab();
+  await sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range: "Slips!A:J",
+    valueInputOption: "RAW",
+    requestBody: {
+      values: [[
+        txnKey, now(), provider || "", amount ?? "", slipTime || "",
+        receiver || "", ref || "", customer || "", result || "", fingerprint || "",
+      ]],
+    },
+  });
+}

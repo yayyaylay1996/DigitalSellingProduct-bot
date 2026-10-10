@@ -15,3 +15,10 @@ photo_*.jpeg
 # local-only: secrets prepared for the host dashboard
 railway-env.txt
 railway-env-clean.txt
+
+# shop website — lives in its own repo (goingforward-premium)
+site/
+
+# real customer payment slips used to try the slip checker — never commit
+slip-samples/
+Pay Slip samples/

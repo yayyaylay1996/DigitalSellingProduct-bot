@@ -34,6 +34,7 @@ import {
 } from "./sheets.js";
 import { pushOrderToDesk, deskEnabled, setZoomEmail, markReminderDone } from "./desk.js";
 import { createZoomReminder, calendarEnabled } from "./calendar.js";
+import { checkSlip, slipCheckEnabled, onSlipKeyProblem, keyHealth, keyWarning } from "./slipcheck.js";
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 if (!token) {
@@ -744,8 +745,12 @@ async function sendPayslipToAdmin(adminId, msg, caption, keyboardRows) {
 
   if (!forwarded) {
     const fileId = msg.photo[msg.photo.length - 1].file_id; // largest size
-    await bot.sendPhoto(adminId, fileId, { caption, parse_mode: "HTML" });
-    return bot.sendMessage(adminId, "👆 Payslip", {
+    // A photo caption is capped at 1024 characters; the slip-check lines can push
+    // past that, so a long caption goes out as the text message instead.
+    const longCaption = caption.length > 1000;
+    await bot.sendPhoto(adminId, fileId, longCaption ? {} : { caption, parse_mode: "HTML" });
+    return bot.sendMessage(adminId, longCaption ? caption : "👆 Payslip", {
+      parse_mode: "HTML",
       reply_markup: { inline_keyboard: keyboardRows },
     });
   }
@@ -763,9 +768,44 @@ function toAmount(v) {
   return Number(String(v).replace(/[,\s]/g, ""));
 }
 
+// ─── Baht payments ───────────────────────────────────────────────────────────
+// Orders are priced in MMK. Customers paying from a Thai bank are told how many
+// baht to send, using the rate the admin sets with /rate (Settings → "THB MMK
+// Rate"), falling back to SLIP_THB_MMK_RATE. Rounded UP so a rate wobble never
+// leaves the shop short.
+async function thbRate(settings) {
+  try {
+    const st = settings || (await getSettings());
+    const n = Number(String(st["THB MMK Rate"] || "").replace(/,/g, ""));
+    if (n > 0) return n;
+  } catch {}
+  return Number(process.env.SLIP_THB_MMK_RATE) || 0;
+}
+const bahtDue = (mmk, rate) => (rate > 0 && mmk > 0 ? Math.ceil(mmk / rate) : 0);
+
+/** Read and check the slip photo `msg`, returning the HTML block to show the
+ *  admin — or "" when the checker is off or anything goes wrong, so the slip is
+ *  always forwarded exactly as before. Never throws. */
+async function slipCheckHtml(msg, { expectedAmount = null, ref = "", customer = "" } = {}) {
+  if (!slipCheckEnabled()) return "";
+  try {
+    bot.sendChatAction(msg.chat.id, "typing").catch(() => {});
+    const fileId = msg.photo[msg.photo.length - 1].file_id; // largest size
+    const link = await bot.getFileLink(fileId);
+    const res = await fetch(link);
+    if (!res.ok) throw new Error(`download failed (${res.status})`);
+    const imageBuffer = Buffer.from(await res.arrayBuffer());
+    const result = await checkSlip({ imageBuffer, expectedAmount, ref, customer, thbRate: await thbRate() });
+    return result ? result.html : "";
+  } catch (err) {
+    console.warn("slip check skipped:", err.message);
+    return "";
+  }
+}
+
 /** Built as HTML. The account number and urgent phone are wrapped in <code> so
  *  Telegram renders them tap-to-copy (monospace = one-tap copy in the app). */
-function buildPaymentInstructions(s, orderId, product, charged) {
+function buildPaymentInstructions(s, orderId, product, charged, thb = 0) {
   const note = (s["Payment Note Instruction"] || "").trim();
   const urgent = (s["Urgent Contact Phone"] || "").trim();
   return [
@@ -784,6 +824,9 @@ function buildPaymentInstructions(s, orderId, product, charged) {
     ``,
     `👤 အကောင့်အမည်`,
     `${esc(s["Bank Account Name"] || "-")}`,
+    thb > 0
+      ? `\n🇹🇭 Thai bank (PromptPay) နဲ့ လွှဲမယ်ဆိုရင် <b>${esc(thb.toLocaleString())} THB</b> လွှဲပေးပါ${s["Thai QR File ID"] ? " (အောက်က QR ခလုတ်ကို နှိပ်ပါ)" : ""}`
+      : null,
     note ? `\n📝 ${esc(note)}` : null,
     `━━━━━━━━━━━━━━━`,
     ``,
@@ -871,10 +914,12 @@ async function handleBuyBank(query, productId) {
   awaitingPayslip.set(chatId, orderId);
 
   const s = await getSettings();
-  await bot.sendMessage(chatId, buildPaymentInstructions(s, orderId, product, charged), {
+  const thb = bahtDue(toAmount(charged), await thbRate(s));
+  await bot.sendMessage(chatId, buildPaymentInstructions(s, orderId, product, charged, thb), {
     parse_mode: "HTML",
     reply_markup: {
       inline_keyboard: [
+        ...(thb > 0 && s["Thai QR File ID"] ? [[{ text: `🇹🇭 Thai QR · ${thb.toLocaleString()} THB`, callback_data: `thaiqr:${thb}` }]] : []),
         [{ text: "❌ ပယ်ဖျက်မယ်", callback_data: `cancel:${orderId}` }],
         [{ text: "🏠 ပင်မ Menu", callback_data: "menu" }],
       ],
@@ -1800,6 +1845,64 @@ bot.onText(/^\/announce(?:\s+([\s\S]+))?$/, async (msg, match) => {
   }
 });
 
+// ─── Admin: baht rate and Thai QR ────────────────────────────────────────────
+
+async function requireAdmin(msg) {
+  await maybeCaptureAdmin(msg);
+  const adminId = await resolveAdminChatId();
+  return Boolean(adminId) && String(msg.chat.id) === String(adminId);
+}
+
+/** /rate          → show the current baht rate
+ *  /rate 128      → set it (kyat per 1 baht). Admin only; takes effect immediately. */
+bot.onText(/^\/rate(?:@\w+)?(?:\s+(\S+))?\s*$/i, async (msg, match) => {
+  if (!(await requireAdmin(msg))) return; // silent for everyone else
+  const chatId = msg.chat.id;
+  const current = await thbRate();
+  const raw = match && match[1] ? match[1].replace(/,/g, "") : "";
+  if (!raw) {
+    return bot.sendMessage(
+      chatId,
+      current > 0
+        ? `🇹🇭 Current rate: 1 THB = ${current} MMK\nExample: 100,000 MMK → ${bahtDue(100000, current).toLocaleString()} THB (rounded up)\n\nChange it with /rate 128`
+        : "No baht rate set yet. Set it with /rate 128 (kyat per 1 baht)."
+    );
+  }
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 20 || n > 500) {
+    return bot.sendMessage(chatId, "⚠️ That doesn't look right. Send kyat per 1 baht, e.g. /rate 128 (allowed 20–500).");
+  }
+  await setSetting("THB MMK Rate", String(n));
+  const jump = current > 0 ? ((n - current) / current) * 100 : 0;
+  return bot.sendMessage(
+    chatId,
+    `✅ Rate saved: 1 THB = ${n} MMK${current > 0 ? ` (was ${current})` : ""}\n` +
+      `100,000 MMK → ${bahtDue(100000, n).toLocaleString()} THB for customers, and the slip checker uses the same rate.` +
+      (Math.abs(jump) > 10 ? `\n\n⚠️ That is a ${jump.toFixed(0)}% change — double-check it.` : "")
+  );
+});
+
+/** Admin sends the Thai PromptPay QR picture with the caption /setthaiqr.
+ *  The bot keeps only Telegram's file id (in Settings), never the picture or your number in code. */
+async function handleSetThaiQr(msg) {
+  if (!(await requireAdmin(msg))) return;
+  const fileId = msg.photo[msg.photo.length - 1].file_id;
+  await setSetting("Thai QR File ID", fileId);
+  return bot.sendMessage(msg.chat.id, "✅ Thai QR saved. Customers will see a “🇹🇭 Thai QR” button when they order (needs a baht rate: /rate 128).");
+}
+
+/** Customer tapped the Thai QR button: send the picture with the baht amount. */
+async function sendThaiQr(chatId, thbArg) {
+  const s = await getSettings();
+  const fileId = s["Thai QR File ID"];
+  if (!fileId) return bot.sendMessage(chatId, "Thai QR မရှိသေးပါ။ အကောင့်နံပါတ်နဲ့ လွှဲပေးပါ။");
+  const thb = Number(thbArg) > 0 ? Number(thbArg).toLocaleString() : "";
+  return bot.sendPhoto(chatId, fileId, {
+    caption: `🇹🇭 PromptPay${thb ? ` · <b>${thb} THB</b>` : ""}\nလွှဲပြီးရင် screenshot ကို ဒီမှာ ပို့ပေးပါ 📸`,
+    parse_mode: "HTML",
+  });
+}
+
 // ─── Persistent menu button taps (text from the reply keyboard) ──────────────
 bot.onText(/^\s*Products\s*$/i, (msg) => sendMainMenu(msg.chat.id));
 bot.onText(new RegExp(`^${BTN.discover}$`), (msg) => sendMainMenu(msg.chat.id));
@@ -1843,6 +1946,8 @@ bot.on("callback_query", async (query) => {
         return await handleFaq(chatId, arg);
       case "buy":
         return await handleBuy(query, arg);
+      case "thaiqr":
+        return await sendThaiQr(chatId, arg);
       case "paybank":
         return await handleBuyBank(query, arg);
       case "paywallet":
@@ -1921,6 +2026,7 @@ bot.on("callback_query", async (query) => {
 
 bot.on("photo", async (msg) => {
   const chatId = msg.chat.id;
+  if (/^\/setthaiqr/i.test(msg.caption || "")) return handleSetThaiQr(msg); // admin: save the Thai QR picture
   const pendingId = awaitingPayslip.get(chatId);
   if (!pendingId) return handleTopupPhoto(msg); // not an order payslip — maybe a top-up one
 
@@ -1936,6 +2042,11 @@ bot.on("photo", async (msg) => {
 
     const s = await getSettings();
     const adminId = await resolveAdminChatId(s);
+    const slipHtml = await slipCheckHtml(msg, {
+      expectedAmount: toAmount(pending.price),
+      ref: pending.orderId,
+      customer: pending.customerUsername,
+    });
     const caption = [
       `🧾 <b>New payslip</b>`,
       `🕒 ${esc(now())}`, // when the payslip actually arrived
@@ -1944,6 +2055,7 @@ bot.on("photo", async (msg) => {
       `Product: ${esc(pending.productName)} (${esc(pending.variant)})`,
       `Price: ${esc(pending.price)} MMK`,
       `Customer: ${customerMention(pending.customerUsername, pending.customerChatId)}`,
+      ...(slipHtml ? [``, slipHtml, ``] : []),
       `<i>Tap the “Forwarded from” name above to open their chat.</i>`,
     ].join("\n");
 
@@ -1994,13 +2106,20 @@ async function handleTopupPhoto(msg) {
     const s = await getSettings();
     const adminId = await resolveAdminChatId(s);
     // No amount line — the customer never declared one. The admin reads the
-    // figure off the screenshot and types it after confirming.
+    // figure off the screenshot and types it after confirming. The slip check
+    // (when on) reads it too and shows it, but can't compare it to anything.
+    const slipHtml = await slipCheckHtml(msg, {
+      expectedAmount: null,
+      ref: pending.txId,
+      customer: pending.username,
+    });
     const caption = [
       `👛 <b>Wallet top-up request</b>`,
       `🕒 ${esc(now())}`, // when the payslip actually arrived
       ``,
       `Ref: ${esc(pending.txId)}`,
       `Customer: ${customerMention(pending.username, pending.chatId)}`,
+      ...(slipHtml ? [``, slipHtml] : []),
       `<i>Tap the “Forwarded from” name above to open their chat.</i>`,
       ``,
       `Confirm, then send the amount shown on the slip.`,
@@ -2047,5 +2166,35 @@ ensureWalletTabs()
 ensureOrderExpiryColumn()
   .then(() => console.log("📅 Expiry column ready"))
   .catch((e) => console.error("⚠️ Expiry column unavailable:", e.message));
+
+// ─── Slip checker key watch ──────────────────────────────────────────────────
+// Tell the admin when the slip checker's API key is refused, nearly expired or
+// nearly out of credit — so a prepaid key never lapses unnoticed. Slips keep
+// flowing to the admin either way; only the automatic verdict goes missing.
+async function tellAdmin(text) {
+  try {
+    const id = await resolveAdminChatId();
+    if (id) await bot.sendMessage(id, text);
+  } catch (e) {
+    console.warn("couldn't message admin about slip key:", e.message);
+  }
+}
+onSlipKeyProblem(tellAdmin);
+
+const sentKeyWarnings = new Set();
+async function watchSlipKey() {
+  if (!slipCheckEnabled()) return;
+  try {
+    const w = keyWarning(await keyHealth());
+    if (w && !sentKeyWarnings.has(w.key)) {
+      sentKeyWarnings.add(w.key);
+      await tellAdmin(w.text);
+    }
+  } catch (e) {
+    console.warn("slip key watch failed:", e.message);
+  }
+}
+setTimeout(watchSlipKey, 60 * 1000);
+setInterval(watchSlipKey, 12 * 3600 * 1000);
 
 console.log("🤖 Bot is running...");
