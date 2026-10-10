@@ -38,7 +38,7 @@ const cfg = () => ({
   // Slip times are printed in the provider's local time. Myanmar = UTC+6:30.
   defaultOffsetMin: Number(process.env.SLIP_DEFAULT_TZ_OFFSET_MIN || 390),
   receivers: parseReceivers(process.env.SLIP_RECEIVERS || ""),
-  timeoutMs: Number(process.env.SLIP_TIMEOUT_MS || 30000),
+  timeoutMs: Number(process.env.SLIP_TIMEOUT_MS || 25000),
   // Orders are priced in MMK. When a customer pays in baht, set how many MMK one
   // baht is worth to you (e.g. 135) and the amount is compared after converting.
   thbRate: Number(process.env.SLIP_THB_MMK_RATE || 0),
@@ -120,7 +120,21 @@ const SYSTEM_PROMPT =
   "round them, and if any digit is unclear lower the legibility. " +
   "Always answer by calling record_slip.";
 
+/** One retry for the failures that are usually momentary: a timeout, a network hiccup,
+ *  429 or a 5xx. Key problems (401/402/403) and bad requests are not retried. */
 export async function readSlip(imageBuffer, mediaType = "image/jpeg") {
+  try {
+    return await readSlipOnce(imageBuffer, mediaType);
+  } catch (e) {
+    const transient = /timed out|fetch failed|ECONN|ENOTFOUND|EAI_AGAIN|network/i.test(e.message) || e.status === 429 || e.status >= 500;
+    if (!transient) throw e;
+    console.warn("slip reader retrying after:", e.message);
+    await new Promise((r) => setTimeout(r, 1500));
+    return await readSlipOnce(imageBuffer, mediaType);
+  }
+}
+
+async function readSlipOnce(imageBuffer, mediaType) {
   const c = cfg();
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), c.timeoutMs);
@@ -496,6 +510,8 @@ export function evaluateSlip(f, ctx) {
     else add("ok", `Txn …${key.slice(-6)} is new${how}`);
     if (f.reader_transaction_id) add("info", `The text read as …${txnKeyOf(f.reader_transaction_id).slice(-6)} but the QR says …${key.slice(-6)} — used the QR`);
     if (f.date_fixed) add("info", "Day and month were swapped when reading the date — corrected using the QR");
+    if (f.txn_source === "image" && /kbz/i.test(String(f.provider || "")) && key.length !== 20) add("warn", `KBZPay transaction numbers have 20 digits but this reads ${key.length} (…${key.slice(-6)}) — a digit was probably missed; check it by eye`);
+    else if (f.txn_source === "image" && key.length < 8) add("warn", `Transaction number looks too short (${key.length} characters) — check it by eye`);
     if (f.txn_source === "image") add("info", "Transaction number was read from the picture (no QR found) — a digit could be misread");
   }
   // Same amount + time + receiver as another order's slip, but a different number:

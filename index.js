@@ -803,6 +803,25 @@ async function slipCheckHtml(msg, { expectedAmount = null, ref = "", customer = 
   }
 }
 
+/** The slip check should never hold up the admin or the customer. Wait up to
+ *  SLIP_BUDGET_MS (default 12s) for the verdict; if it isn't ready the slip goes
+ *  out as before and the verdict arrives as a follow-up message when it finishes. */
+async function slipCheckWithin(msg, opts, adminId, label) {
+  const budget = Number(process.env.SLIP_BUDGET_MS || 12000);
+  const job = slipCheckHtml(msg, opts);
+  const LATE = Symbol("late");
+  const first = await Promise.race([job, new Promise((r) => setTimeout(() => r(LATE), budget))]);
+  if (first !== LATE) return first;
+  job
+    .then((html) => {
+      if (html && adminId) {
+        return bot.sendMessage(adminId, `🔍 <b>Slip check finished late</b> — ${esc(label)}\n\n${html}`, { parse_mode: "HTML" });
+      }
+    })
+    .catch(() => {});
+  return "";
+}
+
 /** Built as HTML. The account number and urgent phone are wrapped in <code> so
  *  Telegram renders them tap-to-copy (monospace = one-tap copy in the app). */
 function buildPaymentInstructions(s, orderId, product, charged, thb = 0) {
@@ -2042,11 +2061,11 @@ bot.on("photo", async (msg) => {
 
     const s = await getSettings();
     const adminId = await resolveAdminChatId(s);
-    const slipHtml = await slipCheckHtml(msg, {
+    const slipHtml = await slipCheckWithin(msg, {
       expectedAmount: toAmount(pending.price),
       ref: pending.orderId,
       customer: pending.customerUsername,
-    });
+    }, adminId, `order ${pending.orderId}`);
     const caption = [
       `🧾 <b>New payslip</b>`,
       `🕒 ${esc(now())}`, // when the payslip actually arrived
@@ -2108,11 +2127,11 @@ async function handleTopupPhoto(msg) {
     // No amount line — the customer never declared one. The admin reads the
     // figure off the screenshot and types it after confirming. The slip check
     // (when on) reads it too and shows it, but can't compare it to anything.
-    const slipHtml = await slipCheckHtml(msg, {
+    const slipHtml = await slipCheckWithin(msg, {
       expectedAmount: null,
       ref: pending.txId,
       customer: pending.username,
-    });
+    }, adminId, `top-up ${pending.txId}`);
     const caption = [
       `👛 <b>Wallet top-up request</b>`,
       `🕒 ${esc(now())}`, // when the payslip actually arrived

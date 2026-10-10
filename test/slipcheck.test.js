@@ -294,3 +294,12 @@ test("day/month swapped by the reader is corrected from the QR time", () => {
   const edited = applyQr({ ...slip1, transaction_datetime: "2026-10-08T12:00:00" }, { kind: "kbzpay", txnId: slip1.transaction_id, tsMs: slip1Utc });
   assert.equal(edited.date_fixed, undefined);
 });
+
+test("a short or wrong-length transaction number read from the picture is flagged", () => {
+  const short = evaluateSlip(applyQr({ ...slip1, transaction_id: "451" }, null), base());
+  assert.ok(has(short, "warn", /20 digits but this reads 3/));
+  const ok20 = evaluateSlip(applyQr(slip1, null), base());
+  assert.ok(!has(ok20, "warn", /20 digits/));
+  const other = evaluateSlip(applyQr({ ...slip1, provider: "AYA Pay", transaction_id: "12345" }, null), base());
+  assert.ok(has(other, "warn", /too short/));
+});
