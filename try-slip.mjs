@@ -40,6 +40,7 @@ const ctxFor = (amt) => ({
 
 let ok = 0, failed = 0;
 for (const file of files) {
+  const t0 = Date.now();
   try {
     const buf = fs.readFileSync(file);
     const [read, qr] = await Promise.all([readSlip(buf, mediaOf(file)), readSlipQr(buf)]);
@@ -59,12 +60,12 @@ for (const file of files) {
         `${String(fields.amount ?? "?").padStart(8)} ${String(fields.transaction_datetime || "?").padEnd(19)} ` +
         `txn …${tx.slice(-4).padEnd(4)} to ${String(fields.receiver_name || "?").slice(0, 16).padEnd(16)} ` +
         `${String(fields.receiver_account_tail || "").padEnd(5)} ${fields.legibility || ""} ` +
-        `${fields.txn_source === "qr" ? "QR✓" : "no-QR"}${fields.reader_transaction_id ? " (reader had …" + String(fields.reader_transaction_id).slice(-4) + ")" : ""}`
+        `${Math.round((Date.now() - t0) / 100) / 10}s ${fields.txn_source === "qr" ? "QR✓" : "no-QR"}${fields.reader_transaction_id ? " (reader had …" + String(fields.reader_transaction_id).slice(-4) + ")" : ""}`
       );
     }
   } catch (e) {
     failed++;
-    console.log(`${path.basename(file)}: FAILED — ${e.message}`);
+    console.log(`${path.basename(file)}: FAILED after ${Math.round((Date.now() - t0) / 1000)}s — ${e.message}`);
   }
 }
 console.log(`\nRead ${ok} of ${files.length}${failed ? `, ${failed} failed` : ""}.`);
