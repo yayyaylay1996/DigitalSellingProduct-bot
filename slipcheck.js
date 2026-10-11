@@ -40,7 +40,7 @@ const cfg = () => ({
   receivers: parseReceivers(process.env.SLIP_RECEIVERS || ""),
   timeoutMs: Number(process.env.SLIP_TIMEOUT_MS || 28000),
   hedgeMs: Number(process.env.SLIP_HEDGE_MS || 6000),
-  maxAttempts: Number(process.env.SLIP_MAX_ATTEMPTS || 4),
+  maxAttempts: Number(process.env.SLIP_MAX_ATTEMPTS || 2),
   // Orders are priced in MMK. When a customer pays in baht, set how many MMK one
   // baht is worth to you (e.g. 135) and the amount is compared after converting.
   thbRate: Number(process.env.SLIP_THB_MMK_RATE || 0),
