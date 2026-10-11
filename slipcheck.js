@@ -19,33 +19,66 @@
 
 // ─── Settings (read lazily so tests / the CLI can set env first) ─────────────
 
-const cfg = () => ({
-  // SLIP_API_KEY wins; ANTHROPIC_API_KEY still works (older setups).
-  apiKey: process.env.SLIP_API_KEY || process.env.ANTHROPIC_API_KEY || "",
-  // Where to send slips. Official Anthropic by default; a reseller/relay that
-  // speaks the Anthropic format (e.g. https://api.orynx.dev) is just a different
-  // base URL — host only, no /v1.
-  baseUrl: (process.env.SLIP_API_BASE_URL || "https://api.anthropic.com").trim().replace(/\/+$/, "").replace(/\/v1$/, ""),
-  // Optional: the day the key stops working (YYYY-MM-DD). Used for reminders
-  // when the provider can't tell us itself.
-  keyExpires: (process.env.SLIP_KEY_EXPIRES || "").trim(),
+/** Ordered list of places to send slips. The official Anthropic key (ANTHROPIC_API_KEY) goes first;
+ *  SLIP_API_KEY (+ SLIP_API_BASE_URL, e.g. the ORYNX reseller) is the backup. With only one of them
+ *  set, it works exactly as before. Key expiry dates: ANTHROPIC_KEY_EXPIRES / SLIP_KEY_EXPIRES. */
+export function slipProviders(env = process.env) {
+  const norm = (u) => String(u || "").trim().replace(/\/+$/, "").replace(/\/v1$/, "");
+  const official = String(env.ANTHROPIC_API_KEY || "").trim();
+  const other = String(env.SLIP_API_KEY || "").trim();
+  const otherBase = norm(env.SLIP_API_BASE_URL) || "https://api.anthropic.com";
+  const baseModel = env.SLIP_MODEL || "claude-haiku-4-5";
+  const slipExp = String(env.SLIP_KEY_EXPIRES || "").trim();
+  const list = [];
+  if (official) {
+    list.push({
+      name: "official Anthropic key",
+      apiKey: official,
+      baseUrl: "https://api.anthropic.com",
+      model: env.SLIP_MODEL_OFFICIAL || baseModel,
+      expires: String(env.ANTHROPIC_KEY_EXPIRES || "").trim() || (other && other !== official ? "" : slipExp),
+    });
+  }
+  if (other && other !== official) {
+    let host = otherBase;
+    try { host = new URL(otherBase).host; } catch {}
+    list.push({
+      name: official ? `backup key (${host})` : "slip checker key",
+      apiKey: other,
+      baseUrl: otherBase,
+      model: baseModel,
+      expires: slipExp,
+    });
+  }
+  return list;
+}
+
+const cfg = () => {
+  const providers = slipProviders();
+  const p = providers[0] || { apiKey: "", baseUrl: "https://api.anthropic.com", model: process.env.SLIP_MODEL || "claude-haiku-4-5", expires: "", name: "" };
+  return {
+  providers,
+  apiKey: p.apiKey,
+  baseUrl: p.baseUrl,
+  keyExpires: p.expires,
   balanceCheck: String(process.env.SLIP_BALANCE_CHECK || "").toLowerCase() !== "off",
   off: String(process.env.SLIP_CHECK || "").toLowerCase() === "off",
   // Haiku is the cheap reader; switch to a bigger model via SLIP_MODEL if it
   // ever misreads your customers' blurrier screenshots.
-  model: process.env.SLIP_MODEL || "claude-haiku-4-5",
+  model: p.model,
   maxAgeMin: Number(process.env.SLIP_MAX_AGE_MIN || 120),
   // Slip times are printed in the provider's local time. Myanmar = UTC+6:30.
   defaultOffsetMin: Number(process.env.SLIP_DEFAULT_TZ_OFFSET_MIN || 390),
   receivers: parseReceivers(process.env.SLIP_RECEIVERS || ""),
   timeoutMs: Number(process.env.SLIP_TIMEOUT_MS || 28000),
   hedgeMs: Number(process.env.SLIP_HEDGE_MS || 6000),
-  maxAttempts: Number(process.env.SLIP_MAX_ATTEMPTS || 2),
+  maxAttempts: Number(process.env.SLIP_MAX_ATTEMPTS || (providers.length > 1 ? 3 : 2)),
   // Orders are priced in MMK. When a customer pays in baht, set how many MMK one
   // baht is worth to you (e.g. 135) and the amount is compared after converting.
   thbRate: Number(process.env.SLIP_THB_MMK_RATE || 0),
   rateTolPct: Number(process.env.SLIP_RATE_TOLERANCE_PCT || 3),
-});
+  };
+};
 
 export function slipCheckEnabled() {
   const c = cfg();
@@ -122,15 +155,17 @@ const SYSTEM_PROMPT =
   "round them, and if any digit is unclear lower the legibility. " +
   "Always answer by calling record_slip.";
 
-/** The reseller we use stalls about 1 call in 3 for ~23s (even tiny text-only calls), then
- *  answers fine on the next try. So instead of waiting, we "hedge": if the first request has not
- *  answered after SLIP_HEDGE_MS, a second identical request starts in parallel (then a third),
- *  and the first good answer wins; the slower ones are cancelled. Key problems (401/402/403)
- *  and bad requests stop everything at once. Costs a few extra cents only when the provider is slow. */
+/** Reads the slip with hedging across providers. The first request goes to the main provider; if it has
+ *  not answered after SLIP_HEDGE_MS (a stall) or fails fast, the next provider is tried in parallel
+ *  (the same one again when only one key is set). The first good answer wins and the rest are cancelled.
+ *  A key/credit problem moves straight on to the next provider and tells the admin; with no provider
+ *  left, or on a bad request, it throws. */
 export async function readSlip(imageBuffer, mediaType = "image/jpeg") {
   const c = cfg();
+  const provs = c.providers.length ? c.providers : [undefined];
   const maxAttempts = Math.max(1, c.maxAttempts);
   const ctrls = [];
+  const bad = new Set();
   return await new Promise((resolve, reject) => {
     let done = false;
     let started = 0;
@@ -146,21 +181,29 @@ export async function readSlip(imageBuffer, mediaType = "image/jpeg") {
     };
     const launch = () => {
       if (done || started >= maxAttempts) return;
+      const usable = provs.map((_, i) => i).filter((i) => !bad.has(i));
+      if (!usable.length) return;
+      const pi = usable[started % usable.length];
       started += 1;
       const n = started;
       const ctrl = new AbortController();
       ctrls.push(ctrl);
-      if (n > 1) console.warn(`slip reader: starting parallel attempt ${n}`);
-      readSlipOnce(imageBuffer, mediaType, ctrl.signal).then(
+      if (n > 1) console.warn(`slip reader: starting attempt ${n} (${provs[pi]?.name || "main"})`);
+      readSlipOnce(imageBuffer, mediaType, ctrl.signal, provs[pi]).then(
         (out) => finish(resolve, out),
         (e) => {
           if (done) return;
           lastErr = e;
           const transient = /timed out|fetch failed|ECONN|ENOTFOUND|EAI_AGAIN|network|no result/i.test(e.message) || e.status === 429 || e.status >= 500;
-          if (!transient) return finish(reject, e);
+          const keyIssue = !transient && isKeyProblem(e.status, e.message);
+          if (!transient && !keyIssue) return finish(reject, e);
+          if (keyIssue) {
+            bad.add(pi);
+            if (bad.size >= provs.length) return finish(reject, e);
+          }
           failed += 1;
           if (started < maxAttempts) {
-            // a fast failure: try again straight away rather than wait for the hedge timer
+            // a fast failure: try the next provider straight away rather than wait for the hedge timer
             clearTimeout(hedgeTimer);
             launch();
             schedule();
@@ -182,8 +225,8 @@ export async function readSlip(imageBuffer, mediaType = "image/jpeg") {
   });
 }
 
-async function readSlipOnce(imageBuffer, mediaType, outerSignal) {
-  const c = cfg();
+async function readSlipOnce(imageBuffer, mediaType, outerSignal, provider) {
+  const c = { ...cfg(), ...(provider || {}) };
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort("timeout"), c.timeoutMs);
   const onOuter = () => ctrl.abort("cancelled");
@@ -216,7 +259,7 @@ async function readSlipOnce(imageBuffer, mediaType, outerSignal) {
     });
     if (!res.ok) {
       const body = await res.text().catch(() => "");
-      noteApiFailure(res.status, body);
+      noteApiFailure(res.status, body, provider?.name || "");
       const err = new Error(`reader API ${res.status}${body ? `: ${body.slice(0, 160)}` : ""}`);
       err.status = res.status;
       throw err;
@@ -240,7 +283,7 @@ async function readSlipOnce(imageBuffer, mediaType, outerSignal) {
 // should hear about it instead of silently losing the checker.
 
 const keyProblemListeners = [];
-let lastProblemAt = 0;
+const lastProblemAt = new Map(); // provider name -> ms
 
 /** index.js registers a function here; it is called (at most once every 6 hours)
  *  with a short plain-text message when the provider refuses our key. */
@@ -254,14 +297,15 @@ export function isKeyProblem(status, body = "") {
   return /credit|balance|quota|insufficient|expired|billing/i.test(String(body)) && status >= 400;
 }
 
-function noteApiFailure(status, body) {
+function noteApiFailure(status, body, label = "") {
   if (!isKeyProblem(status, body)) return;
   const now = Date.now();
-  if (now - lastProblemAt < 6 * 3600 * 1000) return;
-  lastProblemAt = now;
+  if (now - (lastProblemAt.get(label) || 0) < 6 * 3600 * 1000) return;
+  lastProblemAt.set(label, now);
   const text =
-    `⚠️ The slip checker's API key was refused (error ${status}). It has probably expired or run out of credit. ` +
-    `Slips are still reaching you, just without the automatic check. ` +
+    `⚠️ The slip checker's API key${label ? ` (${label})` : ""} was refused (error ${status}). It has probably expired or run out of credit. ` +
+    `Slips are still reaching you, just without the automatic check` +
+    `${label && /backup|official/.test(label) ? " (or checked by the other key, if one is set)" : ""}. ` +
     `To fix it: put the new key in .env and in Railway Variables (see SLIP-KEY-RENEWAL.md).`;
   for (const fn of keyProblemListeners) {
     try {

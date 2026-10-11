@@ -17,7 +17,7 @@ if (!(process.env.SLIP_API_KEY || process.env.ANTHROPIC_API_KEY)) {
   console.error("Set SLIP_API_KEY in .env first.");
   process.exit(1);
 }
-console.log(`Reader: ${process.env.SLIP_API_BASE_URL || "https://api.anthropic.com"}  model: ${process.env.SLIP_MODEL || "claude-haiku-4-5"}\n`);
+{ const { slipProviders } = await import("./slipcheck.js"); console.log("Reader: " + slipProviders().map((p, i) => `${i ? "backup" : "main"} ${p.baseUrl} (${p.model})`).join("  |  ") + "\n"); }
 
 const isImg = (f) => /\.(jpe?g|png|webp)$/i.test(f);
 const files = fs.statSync(target).isDirectory()

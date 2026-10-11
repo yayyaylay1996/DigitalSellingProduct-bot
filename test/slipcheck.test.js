@@ -3,7 +3,7 @@
 // so the checking rules are tested without any network or Google access.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { evaluateSlip, parseReceivers, txnKeyOf, keyWarning, isKeyProblem } from "../slipcheck.js";
+import { evaluateSlip, parseReceivers, txnKeyOf, keyWarning, isKeyProblem, slipProviders } from "../slipcheck.js";
 
 const RECEIVERS = parseReceivers("Zin Mar Win|1111");
 
@@ -302,4 +302,25 @@ test("a short or wrong-length transaction number read from the picture is flagge
   assert.ok(!has(ok20, "warn", /20 digits/));
   const other = evaluateSlip(applyQr({ ...slip1, provider: "AYA Pay", transaction_id: "12345" }, null), base());
   assert.ok(has(other, "warn", /too short/));
+});
+
+test("providers: official key first, SLIP_API_KEY is the backup", () => {
+  const p = slipProviders({ ANTHROPIC_API_KEY: "sk-ant-x", SLIP_API_KEY: "sk-orynx-y", SLIP_API_BASE_URL: "https://api.orynx.dev/", SLIP_MODEL: "claude-haiku-4-5", SLIP_MODEL_OFFICIAL: "claude-haiku-5-5", ANTHROPIC_KEY_EXPIRES: "2027-10-01", SLIP_KEY_EXPIRES: "2027-01-08" });
+  assert.equal(p.length, 2);
+  assert.equal(p[0].baseUrl, "https://api.anthropic.com");
+  assert.equal(p[0].model, "claude-haiku-5-5");
+  assert.equal(p[0].expires, "2027-10-01");
+  assert.equal(p[1].baseUrl, "https://api.orynx.dev");
+  assert.equal(p[1].model, "claude-haiku-4-5");
+  assert.equal(p[1].expires, "2027-01-08");
+});
+
+test("providers: single key behaves as before", () => {
+  const only = slipProviders({ SLIP_API_KEY: "sk-orynx-y", SLIP_API_BASE_URL: "https://api.orynx.dev", SLIP_KEY_EXPIRES: "2027-01-08" });
+  assert.equal(only.length, 1);
+  assert.equal(only[0].expires, "2027-01-08");
+  const ant = slipProviders({ ANTHROPIC_API_KEY: "sk-ant-x", SLIP_KEY_EXPIRES: "2027-10-01" });
+  assert.equal(ant.length, 1);
+  assert.equal(ant[0].expires, "2027-10-01");
+  assert.equal(slipProviders({}).length, 0);
 });
