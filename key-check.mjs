@@ -4,6 +4,19 @@
 import "dotenv/config";
 import { keyHealth, keyWarning, slipProviders } from "./slipcheck.js";
 
+import fs from "node:fs";
+// dotenv never overrides a variable the Terminal already has. If it does, the .env value is silently ignored.
+try {
+  const file = fs.readFileSync(new URL("./.env", import.meta.url), "utf8");
+  for (const name of ["ANTHROPIC_API_KEY", "SLIP_API_KEY"]) {
+    const m = file.match(new RegExp(`^\\s*(?:export\\s+)?${name}\\s*=\\s*(.*)$`, "m"));
+    const inFile = m ? m[1].trim().replace(/^["']|["']$/g, "") : "";
+    const live = process.env[name] || "";
+    if (inFile && live && inFile !== live)
+      console.log(`⚠️  Your Terminal has its own ${name} (…${live.slice(-4)}, ${live.length} characters) that overrides the one in .env (…${inFile.slice(-4)}, ${inFile.length} characters). Run:  unset ${name}   and try again. (Railway is not affected.)\n`);
+  }
+} catch {}
+
 const provs = slipProviders();
 if (!provs.length) { console.error("No ANTHROPIC_API_KEY or SLIP_API_KEY in .env."); process.exit(1); }
 provs.forEach((p, i) => console.log(`${i === 0 ? "Main  " : "Backup"}: ${p.name}\n        ${p.baseUrl}  model ${p.model}  key …${p.apiKey.slice(-4)} (${p.apiKey.length} characters)  expires ${p.expires || "not set"}`));
