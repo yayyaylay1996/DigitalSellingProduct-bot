@@ -151,7 +151,7 @@ const SYSTEM_PROMPT =
   "amount is the amount sent, not including any fee. Convert 12-hour times " +
   "(\"1:59 PM\") to 24-hour (13:59). Months may be written as words (\"10 October 2026\"). " +
   "Burmese numerals (၀-၉) are digits: ၂၅,၀၀၀ is 25000. A yellow Wave-style app with a 10-digit " +
-  "transaction number is Wave Money (labels: လုပ်ဆောင်ချက်အိုင်ဒီ = transaction ID, ပမာဏ = amount, ဝန်ဆောင်ခ = fee, " +
+  "transaction number is Wave Money; its footer may say \"receipt by WAVE\" and its icon is a wallet with a green tick and \"_ks\" (labels: လုပ်ဆောင်ချက်အိုင်ဒီ = transaction ID, ပမာဏ = amount, ဝန်ဆောင်ခ = fee, " +
   "နေ့ရက်နှင့်အချိန် = date and time, အောင်မြင်ပါသည် = successful; the receiver's phone number is shown in full). " +
   "Burmese month names: ဇန်နဝါရီ Jan, ဖေဖော်ဝါရီ Feb, မတ် Mar, ဧပြီ Apr, မေ May, ဇွန် Jun, ဇူလိုင် Jul, ဩဂုတ် Aug, စက်တင်ဘာ Sep, အောက်တိုဘာ Oct, နိုဝင်ဘာ Nov, ဒီဇင်ဘာ Dec. " +
   "Burmese day parts: နံနက် = morning (AM), နေ့လည် = midday, ညနေ = evening (PM), ည = night (PM): \"၇:၅၅ ညနေ\" is 19:55. " +
