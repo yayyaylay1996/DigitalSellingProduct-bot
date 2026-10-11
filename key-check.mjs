@@ -8,6 +8,15 @@ const provs = slipProviders();
 if (!provs.length) { console.error("No ANTHROPIC_API_KEY or SLIP_API_KEY in .env."); process.exit(1); }
 provs.forEach((p, i) => console.log(`${i === 0 ? "Main  " : "Backup"}: ${p.name}\n        ${p.baseUrl}  model ${p.model}  key …${p.apiKey.slice(-4)} (${p.apiKey.length} characters)  expires ${p.expires || "not set"}`));
 
+// Common slips, caught before they cost an evening
+for (const p of provs) {
+  const official = /api\.anthropic\.com/.test(p.baseUrl);
+  if (official && (!p.apiKey.startsWith("sk-ant-") || p.apiKey.length < 80))
+    console.log(`\n⚠️  ${p.name}: an Anthropic key starts with "sk-ant-" and is about 100+ characters long. This one is ${p.apiKey.length} characters — it was probably cut off when copied. Create a new key and use the Copy button.`);
+  if (p.expires && !/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(p.expires))
+    console.log(`\n⚠️  ${p.name}: the expiry date "${p.expires}" must be written YEAR-MONTH-DAY, e.g. 2028-05-31, or the reminder is ignored.`);
+}
+
 const h = await keyHealth();
 console.log(`\nMain key — expires: ${h.expiresAt ? new Date(h.expiresAt).toISOString().slice(0, 10) : "unknown"}   credit left: ${h.remainingUsd == null ? "unknown" : "$" + h.remainingUsd.toFixed(2)}   (from: ${h.source})`);
 const w = keyWarning(h);
