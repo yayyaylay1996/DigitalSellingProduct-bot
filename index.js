@@ -783,11 +783,12 @@ async function thbRate(settings) {
 }
 const bahtDue = (mmk, rate) => (rate > 0 && mmk > 0 ? Math.ceil(mmk / rate) : 0);
 
-/** Read and check the slip photo `msg`, returning the HTML block to show the
- *  admin — or "" when the checker is off or anything goes wrong, so the slip is
+/** Read and check the slip photo `msg`, returning { html, level } — the HTML
+ *  block to show the admin and the verdict ("ok" | "warn" | "bad" | "error" | "").
+ *  html is "" when the checker is off or anything goes wrong, so the slip is
  *  always forwarded exactly as before. Never throws. */
 async function slipCheckHtml(msg, { expectedAmount = null, ref = "", customer = "" } = {}) {
-  if (!slipCheckEnabled()) return "";
+  if (!slipCheckEnabled()) return { html: "", level: "" };
   try {
     bot.sendChatAction(msg.chat.id, "typing").catch(() => {});
     const fileId = msg.photo[msg.photo.length - 1].file_id; // largest size
@@ -796,10 +797,10 @@ async function slipCheckHtml(msg, { expectedAmount = null, ref = "", customer = 
     if (!res.ok) throw new Error(`download failed (${res.status})`);
     const imageBuffer = Buffer.from(await res.arrayBuffer());
     const result = await checkSlip({ imageBuffer, expectedAmount, ref, customer, thbRate: await thbRate() });
-    return result ? result.html : "";
+    return result ? { html: result.html, level: result.level || "" } : { html: "", level: "" };
   } catch (err) {
     console.warn("slip check skipped:", err.message);
-    return "";
+    return { html: "", level: "" };
   }
 }
 
@@ -813,13 +814,47 @@ async function slipCheckWithin(msg, opts, adminId, label) {
   const first = await Promise.race([job, new Promise((r) => setTimeout(() => r(LATE), budget))]);
   if (first !== LATE) return first;
   job
-    .then((html) => {
+    .then(({ html }) => {
       if (html && adminId) {
         return bot.sendMessage(adminId, `🔍 <b>Slip check finished late</b> — ${esc(label)}\n\n${html}`, { parse_mode: "HTML" });
       }
     })
     .catch(() => {});
-  return "";
+  return { html: "", level: "" };
+}
+
+/** Admin buttons for an order payslip, by slip-check verdict. Green = every
+ *  check passed → one tap. Red = a hard problem (e.g. duplicate slip) → "No
+ *  Verify" leads and approving needs a second, confirming tap. */
+function orderVerifyRow(orderId, level) {
+  if (level === "ok") {
+    return [
+      { text: "✅ Money received — Verify", callback_data: `verify:${orderId}` },
+      { text: "❌ No Verify", callback_data: `noverify:${orderId}` },
+    ];
+  }
+  if (level === "bad") {
+    return [
+      { text: "❌ No Verify", callback_data: `noverify:${orderId}` },
+      { text: "⚠️ Verify anyway…", callback_data: `verifyask:${orderId}` },
+    ];
+  }
+  return [
+    { text: "✅ Verified", callback_data: `verify:${orderId}` },
+    { text: "❌ No Verify", callback_data: `noverify:${orderId}` },
+  ];
+}
+
+/** Swap the admin's buttons in place (confirm step / back). */
+async function setAdminButtons(query, rows) {
+  try {
+    await bot.editMessageReplyMarkup(
+      { inline_keyboard: rows },
+      { chat_id: query.message.chat.id, message_id: query.message.message_id }
+    );
+  } catch (e) {
+    console.error("setAdminButtons:", e.message);
+  }
 }
 
 /** Built as HTML. The account number and urgent phone are wrapped in <code> so
@@ -1985,6 +2020,25 @@ bot.on("callback_query", async (query) => {
           ? await handleVerify(query, pending)
           : await handleNoVerify(query, pending);
       }
+      case "verifyask":
+      case "verifyback": {
+        const adminId = await resolveAdminChatId();
+        if (!adminId || String(chatId) !== String(adminId)) return; // admin only
+        const pending = pendingOrders.get(arg);
+        if (!pending) {
+          return await bot.sendMessage(chatId, "ℹ️ This order was already handled or cancelled.");
+        }
+        const contact = customerButtonRow(pending.customerUsername);
+        const rows =
+          action === "verifyask"
+            ? [[
+                { text: "⚠️ Yes, verify — I checked the money", callback_data: `verify:${arg}` },
+                { text: "↩️ Back", callback_data: `verifyback:${arg}` },
+              ]]
+            : [orderVerifyRow(arg, pending.slipLevel)];
+        if (contact) rows.push(contact);
+        return await setAdminButtons(query, rows);
+      }
       case "topup":
         return await startTopUpRequest(chatId, query.from);
       case "topupcancel":
@@ -2061,7 +2115,7 @@ bot.on("photo", async (msg) => {
 
     const s = await getSettings();
     const adminId = await resolveAdminChatId(s);
-    const slipHtml = await slipCheckWithin(msg, {
+    const { html: slipHtml, level: slipLevel } = await slipCheckWithin(msg, {
       expectedAmount: toAmount(pending.price),
       ref: pending.orderId,
       customer: pending.customerUsername,
@@ -2079,12 +2133,8 @@ bot.on("photo", async (msg) => {
     ].join("\n");
 
     if (adminId) {
-      const rows = [
-        [
-          { text: "✅ Verified", callback_data: `verify:${pending.orderId}` },
-          { text: "❌ No Verify", callback_data: `noverify:${pending.orderId}` },
-        ],
-      ];
+      pending.slipLevel = slipLevel || "";
+      const rows = [orderVerifyRow(pending.orderId, pending.slipLevel)];
       const contact = customerButtonRow(pending.customerUsername);
       if (contact) rows.push(contact);
 
@@ -2127,7 +2177,7 @@ async function handleTopupPhoto(msg) {
     // No amount line — the customer never declared one. The admin reads the
     // figure off the screenshot and types it after confirming. The slip check
     // (when on) reads it too and shows it, but can't compare it to anything.
-    const slipHtml = await slipCheckWithin(msg, {
+    const { html: slipHtml } = await slipCheckWithin(msg, {
       expectedAmount: null,
       ref: pending.txId,
       customer: pending.username,
