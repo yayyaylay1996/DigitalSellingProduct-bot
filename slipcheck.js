@@ -38,7 +38,9 @@ const cfg = () => ({
   // Slip times are printed in the provider's local time. Myanmar = UTC+6:30.
   defaultOffsetMin: Number(process.env.SLIP_DEFAULT_TZ_OFFSET_MIN || 390),
   receivers: parseReceivers(process.env.SLIP_RECEIVERS || ""),
-  timeoutMs: Number(process.env.SLIP_TIMEOUT_MS || 25000),
+  timeoutMs: Number(process.env.SLIP_TIMEOUT_MS || 28000),
+  hedgeMs: Number(process.env.SLIP_HEDGE_MS || 6000),
+  maxAttempts: Number(process.env.SLIP_MAX_ATTEMPTS || 4),
   // Orders are priced in MMK. When a customer pays in baht, set how many MMK one
   // baht is worth to you (e.g. 135) and the amount is compared after converting.
   thbRate: Number(process.env.SLIP_THB_MMK_RATE || 0),
@@ -120,24 +122,72 @@ const SYSTEM_PROMPT =
   "round them, and if any digit is unclear lower the legibility. " +
   "Always answer by calling record_slip.";
 
-/** One retry for the failures that are usually momentary: a timeout, a network hiccup,
- *  429 or a 5xx. Key problems (401/402/403) and bad requests are not retried. */
+/** The reseller we use stalls about 1 call in 3 for ~23s (even tiny text-only calls), then
+ *  answers fine on the next try. So instead of waiting, we "hedge": if the first request has not
+ *  answered after SLIP_HEDGE_MS, a second identical request starts in parallel (then a third),
+ *  and the first good answer wins; the slower ones are cancelled. Key problems (401/402/403)
+ *  and bad requests stop everything at once. Costs a few extra cents only when the provider is slow. */
 export async function readSlip(imageBuffer, mediaType = "image/jpeg") {
-  try {
-    return await readSlipOnce(imageBuffer, mediaType);
-  } catch (e) {
-    const transient = /timed out|fetch failed|ECONN|ENOTFOUND|EAI_AGAIN|network/i.test(e.message) || e.status === 429 || e.status >= 500;
-    if (!transient) throw e;
-    console.warn("slip reader retrying after:", e.message);
-    await new Promise((r) => setTimeout(r, 1500));
-    return await readSlipOnce(imageBuffer, mediaType);
-  }
+  const c = cfg();
+  const maxAttempts = Math.max(1, c.maxAttempts);
+  const ctrls = [];
+  return await new Promise((resolve, reject) => {
+    let done = false;
+    let started = 0;
+    let failed = 0;
+    let lastErr = null;
+    let hedgeTimer = null;
+    const finish = (fn, val) => {
+      if (done) return;
+      done = true;
+      clearTimeout(hedgeTimer);
+      for (const k of ctrls) k.abort();
+      fn(val);
+    };
+    const launch = () => {
+      if (done || started >= maxAttempts) return;
+      started += 1;
+      const n = started;
+      const ctrl = new AbortController();
+      ctrls.push(ctrl);
+      if (n > 1) console.warn(`slip reader: starting parallel attempt ${n}`);
+      readSlipOnce(imageBuffer, mediaType, ctrl.signal).then(
+        (out) => finish(resolve, out),
+        (e) => {
+          if (done) return;
+          lastErr = e;
+          const transient = /timed out|fetch failed|ECONN|ENOTFOUND|EAI_AGAIN|network|no result/i.test(e.message) || e.status === 429 || e.status >= 500;
+          if (!transient) return finish(reject, e);
+          failed += 1;
+          if (started < maxAttempts) {
+            // a fast failure: try again straight away rather than wait for the hedge timer
+            clearTimeout(hedgeTimer);
+            launch();
+            schedule();
+          } else if (failed >= started) {
+            finish(reject, lastErr);
+          }
+        },
+      );
+    };
+    const schedule = () => {
+      if (done || started >= maxAttempts) return;
+      hedgeTimer = setTimeout(() => {
+        launch();
+        schedule();
+      }, c.hedgeMs);
+    };
+    launch();
+    schedule();
+  });
 }
 
-async function readSlipOnce(imageBuffer, mediaType) {
+async function readSlipOnce(imageBuffer, mediaType, outerSignal) {
   const c = cfg();
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), c.timeoutMs);
+  const timer = setTimeout(() => ctrl.abort("timeout"), c.timeoutMs);
+  const onOuter = () => ctrl.abort("cancelled");
+  if (outerSignal) outerSignal.addEventListener("abort", onOuter, { once: true });
   try {
     const res = await fetch(`${c.baseUrl}/v1/messages`, {
       method: "POST",
@@ -180,6 +230,7 @@ async function readSlipOnce(imageBuffer, mediaType) {
     throw e;
   } finally {
     clearTimeout(timer);
+    if (outerSignal) outerSignal.removeEventListener("abort", onOuter);
   }
 }
 
