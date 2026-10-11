@@ -155,27 +155,44 @@ const SYSTEM_PROMPT =
   "နေ့ရက်နှင့်အချိန် = date and time, အောင်မြင်ပါသည် = successful; the receiver's phone number is shown in full). " +
   "Burmese month names: ဇန်နဝါရီ Jan, ဖေဖော်ဝါရီ Feb, မတ် Mar, ဧပြီ Apr, မေ May, ဇွန် Jun, ဇူလိုင် Jul, ဩဂုတ် Aug, စက်တင်ဘာ Sep, အောက်တိုဘာ Oct, နိုဝင်ဘာ Nov, ဒီဇင်ဘာ Dec. " +
   "Burmese day parts: နံနက် = morning (AM), နေ့လည် = midday, ညနေ = evening (PM), ည = night (PM): \"၇:၅၅ ညနေ\" is 19:55. " +
+  "On Wave slips the card near the top shows the receiver's name and full phone number (report both), and every detail row sits below it: always report the receiver, the date/time and the transaction ID when they are visible, even on a photo of a phone screen. " +
   "Copy transaction numbers digit by digit; do not group or " +
   "round them, and if any digit is unclear lower the legibility. " +
   "Always answer by calling record_slip.";
 
-/** Reads the slip with hedging across providers. The first request goes to the main provider; if it has
- *  not answered after SLIP_HEDGE_MS (a stall) or fails fast, the next provider is tried in parallel
- *  (the same one again when only one key is set). The first good answer wins and the rest are cancelled.
- *  A key/credit problem moves straight on to the next provider and tells the admin; with no provider
- *  left, or on a bad request, it throws. */
+const KEY_FIELDS = ["amount", "transaction_datetime", "receiver_account_tail", "transaction_id"];
+const hasVal = (v) => v !== undefined && v !== null && String(v).trim() !== "";
+const missingKeys = (o) => KEY_FIELDS.filter((k) => !hasVal(o?.[k])).length;
+
+/** A reading is "complete" when it has what the checks need: amount, time, receiver's last 4 and a transaction number.
+ *  "Not a payment slip" counts as complete (nothing more to read). */
+export function slipIsComplete(out) {
+  if (!out || out.is_payment_slip === false) return true;
+  return missingKeys(out) === 0;
+}
+
+/** Reads the slip with hedging across providers.
+ *  - The first request goes to the main provider; if it has not answered after SLIP_HEDGE_MS (a stall) or fails
+ *    fast, the next provider is tried in parallel (the same one again when only one key is set).
+ *  - The first COMPLETE answer wins and the rest are cancelled. A thin answer (fields missing) is held while
+ *    another request is still running; if nothing better arrives, one more careful look is taken, and the
+ *    fullest answer is used.
+ *  - A key/credit problem moves straight on to the next provider and tells the admin; with no provider left,
+ *    or on a bad request, it throws (or returns the fullest answer held so far). */
 export async function readSlip(imageBuffer, mediaType = "image/jpeg") {
   const c = cfg();
   const provs = c.providers.length ? c.providers : [undefined];
   const maxAttempts = Math.max(1, c.maxAttempts);
   const ctrls = [];
   const bad = new Set();
+  const held = [];
   return await new Promise((resolve, reject) => {
     let done = false;
     let started = 0;
-    let failed = 0;
+    let pending = 0;
     let lastErr = null;
     let hedgeTimer = null;
+    let lookedAgain = false;
     const finish = (fn, val) => {
       if (done) return;
       done = true;
@@ -183,36 +200,61 @@ export async function readSlip(imageBuffer, mediaType = "image/jpeg") {
       for (const k of ctrls) k.abort();
       fn(val);
     };
-    const launch = () => {
-      if (done || started >= maxAttempts) return;
+    const best = () => held.reduce((a, b) => (missingKeys(b) < missingKeys(a) ? b : a));
+    // Called when nothing is running and nothing new was launched.
+    const settle = () => {
+      if (done || pending > 0) return;
+      if (held.length) {
+        const b = best();
+        if (!lookedAgain && !slipIsComplete(b)) {
+          lookedAgain = true;
+          console.warn("slip reader: some fields missing, taking one more careful look");
+          return launch({ force: true });
+        }
+        return finish(resolve, b);
+      }
+      finish(reject, lastErr || new Error("reader gave no result"));
+    };
+    const launch = (opts = {}) => {
+      if (done) return;
+      if (!opts.force && started >= maxAttempts) return;
       const usable = provs.map((_, i) => i).filter((i) => !bad.has(i));
       if (!usable.length) return;
-      const pi = usable[started % usable.length];
+      const pi = opts.force ? usable[0] : usable[started % usable.length];
       started += 1;
+      pending += 1;
       const n = started;
       const ctrl = new AbortController();
       ctrls.push(ctrl);
-      if (n > 1) console.warn(`slip reader: starting attempt ${n} (${provs[pi]?.name || "main"})`);
-      readSlipOnce(imageBuffer, mediaType, ctrl.signal, provs[pi]).then(
-        (out) => finish(resolve, out),
+      if (n > 1 && !opts.force) console.warn(`slip reader: starting attempt ${n} (${provs[pi]?.name || "main"})`);
+      const hint = opts.force
+        ? "An earlier reading was missing some fields. Look again carefully and report every field you can actually read, especially the receiver's name and phone number, the date and time, and the transaction ID."
+        : "";
+      readSlipOnce(imageBuffer, mediaType, ctrl.signal, provs[pi], hint).then(
+        (out) => {
+          pending -= 1;
+          if (done) return;
+          if (slipIsComplete(out)) return finish(resolve, out);
+          held.push(out);
+          settle();
+        },
         (e) => {
+          pending -= 1;
           if (done) return;
           lastErr = e;
           const transient = /timed out|fetch failed|ECONN|ENOTFOUND|EAI_AGAIN|network|no result/i.test(e.message) || e.status === 429 || e.status >= 500;
           const keyIssue = !transient && isKeyProblem(e.status, e.message);
-          if (!transient && !keyIssue) return finish(reject, e);
-          if (keyIssue) {
-            bad.add(pi);
-            if (bad.size >= provs.length) return finish(reject, e);
-          }
-          failed += 1;
-          if (started < maxAttempts) {
-            // a fast failure: try the next provider straight away rather than wait for the hedge timer
+          if (!transient && !keyIssue) return held.length ? finish(resolve, best()) : finish(reject, e);
+          if (keyIssue) bad.add(pi);
+          if (started < maxAttempts && bad.size < provs.length) {
+            // a failure: try the next provider straight away rather than wait for the hedge timer
             clearTimeout(hedgeTimer);
+            const before = started;
             launch();
             schedule();
-          } else if (failed >= started) {
-            finish(reject, lastErr);
+            if (started === before) settle();
+          } else {
+            settle();
           }
         },
       );
@@ -231,7 +273,7 @@ export async function readSlip(imageBuffer, mediaType = "image/jpeg") {
 
 const noForcedTool = new Set(); // models that rejected tool_choice "tool"
 
-async function readSlipOnce(imageBuffer, mediaType, outerSignal, provider) {
+async function readSlipOnce(imageBuffer, mediaType, outerSignal, provider, hint = "") {
   const c = { ...cfg(), ...(provider || {}) };
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort("timeout"), c.timeoutMs);
@@ -258,7 +300,7 @@ async function readSlipOnce(imageBuffer, mediaType, outerSignal, provider) {
               role: "user",
               content: [
                 { type: "image", source: { type: "base64", media_type: mediaType, data: imageBuffer.toString("base64") } },
-                { type: "text", text: "Read this payment slip." },
+                { type: "text", text: hint ? `Read this payment slip. ${hint}` : "Read this payment slip." },
               ],
             },
           ],

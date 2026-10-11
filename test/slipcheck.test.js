@@ -3,7 +3,7 @@
 // so the checking rules are tested without any network or Google access.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { evaluateSlip, parseReceivers, txnKeyOf, keyWarning, isKeyProblem, slipProviders } from "../slipcheck.js";
+import { evaluateSlip, parseReceivers, txnKeyOf, keyWarning, isKeyProblem, slipProviders, slipIsComplete } from "../slipcheck.js";
 
 const RECEIVERS = parseReceivers("Zin Mar Win|1111");
 
@@ -323,4 +323,12 @@ test("providers: single key behaves as before", () => {
   assert.equal(ant.length, 1);
   assert.equal(ant[0].expires, "2027-10-01");
   assert.equal(slipProviders({}).length, 0);
+});
+
+test("a reading is complete only with amount, time, receiver tail and txn number", () => {
+  const full = { is_payment_slip: true, amount: 100, transaction_datetime: "2026-10-11T10:00:00", receiver_account_tail: "9141", transaction_id: "123" };
+  assert.equal(slipIsComplete(full), true);
+  assert.equal(slipIsComplete({ ...full, transaction_id: "" }), false);
+  assert.equal(slipIsComplete({ ...full, transaction_datetime: undefined }), false);
+  assert.equal(slipIsComplete({ is_payment_slip: false }), true);
 });
