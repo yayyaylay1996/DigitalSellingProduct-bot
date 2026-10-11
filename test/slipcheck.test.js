@@ -3,7 +3,7 @@
 // so the checking rules are tested without any network or Google access.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { evaluateSlip, parseReceivers, txnKeyOf, keyWarning, isKeyProblem, slipProviders, slipIsComplete } from "../slipcheck.js";
+import { evaluateSlip, parseReceivers, txnKeyOf, keyWarning, isKeyProblem, slipProviders, slipIsComplete, parseBurmeseAmount, parseBurmeseDateTime, normalizeBurmese, reconcile, needsSecondOpinion } from "../slipcheck.js";
 
 const RECEIVERS = parseReceivers("Zin Mar Win|1111");
 
@@ -331,4 +331,44 @@ test("a reading is complete only with amount, time, receiver tail and txn number
   assert.equal(slipIsComplete({ ...full, transaction_id: "" }), false);
   assert.equal(slipIsComplete({ ...full, transaction_datetime: undefined }), false);
   assert.equal(slipIsComplete({ is_payment_slip: false }), true);
+});
+
+test("Burmese digits are converted exactly, in code", () => {
+  assert.equal(parseBurmeseAmount("၆,၅၀၀.၀၀"), 6500);
+  assert.equal(parseBurmeseAmount("၂၅,၀၀၀.၀၀ ကျပ်"), 25000);
+  assert.equal(parseBurmeseDateTime("၁၈ မေ ၂၀၂၆ • ၇:၅၅ ညနေ"), "2026-05-18T19:55:00");
+  assert.equal(parseBurmeseDateTime("၀၅ မတ် ၂၀၂၆ • ၆:၂၂ ညနေ"), "2026-03-05T18:22:00");
+  assert.equal(parseBurmeseDateTime("၂၉ ဒီဇင်ဘာ ၂၀၂၆ • ၉:၀၅ နံနက်"), "2026-12-29T09:05:00");
+  assert.equal(parseBurmeseDateTime("garbled"), null);
+});
+
+test("a model that mis-converted the amount or time is caught", () => {
+  const ok = normalizeBurmese({ amount: 6500, amount_as_printed: "၆,၅၀၀.၀၀", transaction_datetime: "2026-03-05T18:22:00", datetime_as_printed: "၀၅ မတ် ၂၀၂၆ • ၆:၂၂ ညနေ" });
+  assert.equal(ok.amount, 6500);
+  assert.deepEqual(ok.unsure, []);
+  const bad = normalizeBurmese({ amount: 9900, amount_as_printed: "၆,၅၀၀.၀၀", transaction_datetime: "2024-12-06T18:27:00", datetime_as_printed: "၀၅ မတ် ၂၀၂၆ • ၆:၂၂ ညနေ" });
+  assert.equal(bad.amount, null);
+  assert.equal(bad.transaction_datetime, undefined);
+  assert.deepEqual(bad.unsure, ["amount", "time"]);
+});
+
+test("two readings must agree; disagreement is dropped and flagged", () => {
+  const a = { provider: "Wave Money", legibility: "clear", amount: 6500, transaction_datetime: "2026-03-05T18:22:00", receiver_account_tail: "9141", transaction_id: "1064691145" };
+  const same = reconcile(a, { ...a, transaction_datetime: "2026-03-05T18:22:30" });
+  assert.equal(same.unsure.length, 0);
+  assert.equal(same.legibility, "clear");
+  const diff = reconcile(a, { ...a, amount: 9900, transaction_id: "1064691146" });
+  assert.deepEqual(diff.unsure, ["amount", "transaction number"]);
+  assert.equal(diff.amount, null);
+  assert.equal(diff.transaction_id, undefined);
+  assert.equal(diff.legibility, "partly_unclear");
+  const filled = reconcile({ ...a, transaction_id: "" }, a);
+  assert.equal(filled.transaction_id, "1064691145");
+});
+
+test("only Wave / Burmese-digit slips without a QR get a second opinion", () => {
+  assert.equal(needsSecondOpinion({ provider: "Wave Money" }, null), true);
+  assert.equal(needsSecondOpinion({ provider: "KBZPay", amount_as_printed: "12,000.00" }, { txnId: "x" }), false);
+  assert.equal(needsSecondOpinion({ provider: "KBZPay", amount_as_printed: "12,000.00" }, null), false);
+  assert.equal(needsSecondOpinion({ provider: "KBZPay", digits_script: "burmese" }, null), true);
 });

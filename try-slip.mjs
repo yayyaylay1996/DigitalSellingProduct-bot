@@ -5,7 +5,7 @@
 import "dotenv/config";
 import fs from "fs";
 import path from "path";
-import { readSlip, evaluateSlip, parseReceivers, applyQr, fpKeyOf } from "./slipcheck.js";
+import { readSlipFull, evaluateSlip, parseReceivers, applyQr, fpKeyOf } from "./slipcheck.js";
 import { readSlipQr } from "./slipqr.js";
 
 const [target, expected] = process.argv.slice(2);
@@ -43,7 +43,8 @@ for (const file of files) {
   const t0 = Date.now();
   try {
     const buf = fs.readFileSync(file);
-    const [read, qr] = await Promise.all([readSlip(buf, mediaOf(file)), readSlipQr(buf)]);
+    const qrP = readSlipQr(buf);
+    const [read, qr] = await Promise.all([readSlipFull(buf, mediaOf(file), qrP), qrP]);
     const fields = applyQr(read, qr);
     const result = evaluateSlip(fields, ctxFor(expected ? Number(expected) : null));
     ok++;

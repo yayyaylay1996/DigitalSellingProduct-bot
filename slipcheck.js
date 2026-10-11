@@ -125,6 +125,9 @@ const SLIP_TOOL = {
       sender_name: { type: "string" },
       receiver_name: { type: "string", description: "Name of the account the money was sent TO" },
       receiver_account_tail: { type: "string", description: "Last digits of the receiving account/phone if shown (e.g. from ******1111 → 1111)" },
+      digits_script: { type: "string", enum: ["latin", "burmese", "mixed"], description: "Which digits the amount and date are printed in: latin (0-9), burmese (၀-၉), or mixed" },
+      amount_as_printed: { type: "string", description: "The amount exactly as printed, character for character, in the ORIGINAL digits (e.g. ၆,၅၀၀.၀၀ or 12,000.00)" },
+      datetime_as_printed: { type: "string", description: "The date and time exactly as printed, character for character, in the original script and digits (e.g. ၁၈ မေ ၂၀၂၆ • ၇:၅၅ ညနေ)" },
       legibility: { type: "string", enum: ["clear", "partly_unclear", "unreadable"] },
       edit_signs: {
         type: "array",
@@ -156,6 +159,8 @@ const SYSTEM_PROMPT =
   "Burmese month names: ဇန်နဝါရီ Jan, ဖေဖော်ဝါရီ Feb, မတ် Mar, ဧပြီ Apr, မေ May, ဇွန် Jun, ဇူလိုင် Jul, ဩဂုတ် Aug, စက်တင်ဘာ Sep, အောက်တိုဘာ Oct, နိုဝင်ဘာ Nov, ဒီဇင်ဘာ Dec. " +
   "Burmese day parts: နံနက် = morning (AM), နေ့လည် = midday, ညနေ = evening (PM), ည = night (PM): \"၇:၅၅ ညနေ\" is 19:55. " +
   "On Wave slips the card near the top shows the receiver's name and full phone number (report both), and every detail row sits below it: always report the receiver, the date/time and the transaction ID when they are visible, even on a photo of a phone screen. " +
+  "Always also fill amount_as_printed, datetime_as_printed and digits_script by copying the printed characters exactly, glyph by glyph, " +
+  "BEFORE converting anything: Burmese digits ၀၁၂၃၄၅၆၇၈၉ are 0 1 2 3 4 5 6 7 8 9, and ၆ (6) and ၉ (9) are easy to confuse, so look at each glyph twice. " +
   "Copy transaction numbers digit by digit; do not group or " +
   "round them, and if any digit is unclear lower the legibility. " +
   "Always answer by calling record_slip.";
@@ -179,10 +184,11 @@ export function slipIsComplete(out) {
  *    fullest answer is used.
  *  - A key/credit problem moves straight on to the next provider and tells the admin; with no provider left,
  *    or on a bad request, it throws (or returns the fullest answer held so far). */
-export async function readSlip(imageBuffer, mediaType = "image/jpeg") {
+export async function readSlip(imageBuffer, mediaType = "image/jpeg", opts = {}) {
   const c = cfg();
   const provs = c.providers.length ? c.providers : [undefined];
   const maxAttempts = Math.max(1, c.maxAttempts);
+  const readOpts = opts || {};
   const ctrls = [];
   const bad = new Set();
   const held = [];
@@ -227,9 +233,10 @@ export async function readSlip(imageBuffer, mediaType = "image/jpeg") {
       const ctrl = new AbortController();
       ctrls.push(ctrl);
       if (n > 1 && !opts.force) console.warn(`slip reader: starting attempt ${n} (${provs[pi]?.name || "main"})`);
+      const baseHint = readOpts.hint || "";
       const hint = opts.force
-        ? "An earlier reading was missing some fields. Look again carefully and report every field you can actually read, especially the receiver's name and phone number, the date and time, and the transaction ID."
-        : "";
+        ? `${baseHint} An earlier reading was missing some fields. Look again carefully and report every field you can actually read, especially the receiver's name and phone number, the date and time, and the transaction ID.`.trim()
+        : baseHint;
       readSlipOnce(imageBuffer, mediaType, ctrl.signal, provs[pi], hint).then(
         (out) => {
           pending -= 1;
@@ -432,6 +439,112 @@ export async function keyHealth() {
   return out;
 }
 
+// ─── Burmese-numeral slips (Wave): convert in code, and ask for a second opinion ─────
+// Models sometimes turn ၆,၅၀၀ into 9,900 or invent a different date each time. So the reader copies the
+// printed characters, WE convert them exactly, and for these slips a second independent reading must agree.
+
+export const burmeseToLatin = (s) => String(s ?? "").replace(/[\u1040-\u1049]/g, (ch) => String(ch.charCodeAt(0) - 0x1040));
+const HAS_BURMESE_DIGIT = /[\u1040-\u1049]/;
+
+export function parseBurmeseAmount(s) {
+  const t = burmeseToLatin(s).replace(/[,\s]/g, "");
+  const m = t.match(/(\d+)(?:\.(\d+))?/);
+  return m ? Number(m[1] + (m[2] ? "." + m[2] : "")) : null;
+}
+
+const BURMESE_MONTHS = [
+  ["ဇန်နဝါရီ", 1], ["ဖေဖော်ဝါရီ", 2], ["မတ်", 3], ["ဧပြီ", 4], ["မေ", 5], ["ဇွန်", 6],
+  ["ဇူလိုင်", 7], ["ဩဂုတ်", 8], ["စက်တင်ဘာ", 9], ["အောက်တိုဘာ", 10], ["နိုဝင်ဘာ", 11], ["ဒီဇင်ဘာ", 12],
+];
+
+/** "၁၈ မေ ၂၀၂၆ • ၇:၅၅ ညနေ" → "2026-05-18T19:55:00", or null when anything is unclear. */
+export function parseBurmeseDateTime(s) {
+  const raw = String(s ?? "");
+  if (!HAS_BURMESE_DIGIT.test(raw) && !/[\u1000-\u109F]/.test(raw)) return null;
+  const t = burmeseToLatin(raw);
+  const mon = BURMESE_MONTHS.find(([w]) => t.includes(w));
+  const d = t.match(/(?:^|\D)(\d{1,2})(?=\s*[^\d:\s])/);
+  const y = t.match(/\b(20\d{2})\b/);
+  const tm = t.match(/(\d{1,2}):(\d{2})/);
+  if (!mon || !d || !y || !tm) return null;
+  let h = Number(tm[1]);
+  const mi = Number(tm[2]);
+  if (t.includes("နံနက်")) { if (h === 12) h = 0; }
+  else if (t.includes("နေ့လည်")) { if (h < 12 && h <= 5) h += 12; }
+  else if (t.includes("ညနေ")) { if (h < 12) h += 12; }
+  else if (t.includes("ည")) { if (h === 12) h = 0; else if (h >= 6) h += 12; }
+  else return null;
+  const day = Number(d[1]);
+  if (day < 1 || day > 31 || h > 23 || mi > 59) return null;
+  const p2 = (n) => String(n).padStart(2, "0");
+  return `${y[1]}-${p2(mon[1])}-${p2(day)}T${p2(h)}:${p2(mi)}:00`;
+}
+
+/** Use the exactly-converted printed amount/time instead of the model's own conversion. A mismatch means the
+ *  reader could not settle on the digits, so those fields are dropped and listed in `unsure`. */
+export function normalizeBurmese(fields) {
+  const f = { ...fields, unsure: [...(fields.unsure || [])] };
+  if (HAS_BURMESE_DIGIT.test(String(f.amount_as_printed || ""))) {
+    const p = parseBurmeseAmount(f.amount_as_printed);
+    if (p != null) {
+      if (f.amount != null && Math.abs(Number(f.amount) - p) > 0.5) { f.amount = null; f.unsure.push("amount"); }
+      else f.amount = p;
+    }
+  }
+  if (f.datetime_as_printed) {
+    const iso = parseBurmeseDateTime(f.datetime_as_printed);
+    if (iso) {
+      if (f.transaction_datetime && String(f.transaction_datetime).slice(0, 16) !== iso.slice(0, 16)) { delete f.transaction_datetime; f.unsure.push("time"); }
+      else f.transaction_datetime = iso;
+    }
+  }
+  return f;
+}
+
+/** Wave (and anything printed in Burmese digits) has no QR to anchor it, so it gets a second opinion. */
+export function needsSecondOpinion(f, qr) {
+  if (!f || f.is_payment_slip === false || qr?.txnId) return false;
+  return /wave/i.test(String(f.provider || "")) || f.digits_script === "burmese" || f.digits_script === "mixed" ||
+    HAS_BURMESE_DIGIT.test(String(f.amount_as_printed || "") + String(f.datetime_as_printed || ""));
+}
+
+/** Compare two readings of the same slip; a field the two disagree on is dropped and listed in `unsure`. */
+export function reconcile(a, b) {
+  const out = { ...a, unsure: [...new Set([...(a.unsure || []), ...(b.unsure || [])])] };
+  const fields = [
+    ["amount", "amount", (v) => (v == null ? null : Number(v))],
+    ["transaction_datetime", "time", (v) => (v ? String(v).slice(0, 16) : null)],
+    ["receiver_account_tail", "receiver account", (v) => (v ? String(v).replace(/\D/g, "") : null)],
+    ["transaction_id", "transaction number", (v) => (v ? txnKeyOf(v) : null)],
+  ];
+  for (const [key, label, norm] of fields) {
+    const x = norm(a[key]);
+    const y = norm(b[key]);
+    if (x != null && y != null && x !== y) { delete out[key]; if (key === "amount") out.amount = null; if (!out.unsure.includes(label)) out.unsure.push(label); }
+    else if (x == null && y != null && !out.unsure.includes(label)) out[key] = b[key];
+  }
+  if (out.unsure.length && out.legibility === "clear") out.legibility = "partly_unclear";
+  return out;
+}
+
+/** Read one slip: first reading, Burmese-digit conversion, and a second opinion where there is no QR anchor. */
+export async function readSlipFull(imageBuffer, mediaType, qrPromise) {
+  let read = normalizeBurmese(await readSlip(imageBuffer, mediaType));
+  const qr = await Promise.resolve(qrPromise).catch(() => null);
+  if (needsSecondOpinion(read, qr)) {
+    try {
+      const second = normalizeBurmese(await readSlip(imageBuffer, mediaType, {
+        hint: "This is an independent second reading for verification. Read every digit glyph one at a time, and copy the printed amount and date exactly.",
+      }));
+      read = reconcile(read, second);
+    } catch (e) {
+      console.warn("slip second opinion failed:", e.message);
+      read.unsure = [...new Set([...(read.unsure || []), "second check could not run"])];
+    }
+  }
+  return read;
+}
+
 // ─── Checking the fields (pure — no network, easy to test) ───────────────────
 
 const THAI_PROVIDER = /thai|bangkok|promptpay|kbank|kasikorn|scb|krungthai|ktb|krungsri|\bbay\b|ttb|tmb|thanachart|siam commercial|ayudhya|tisco|lh bank|kkp|gsb|\bbbl\b/i;
@@ -560,6 +673,7 @@ export function evaluateSlip(f, ctx) {
   // Legibility / possible edits
   if (f.legibility === "unreadable") add("warn", "Slip is too blurry to read reliably — check it by eye");
   else if (f.legibility === "partly_unclear") add("warn", "Parts of the slip are unclear — double-check the numbers");
+  if (f.unsure?.length) add("warn", `Two readings of this slip disagreed on the ${f.unsure.join(" and ")} — check ${f.unsure.length > 1 ? "them" : "it"} by eye`);
   const edits = Array.isArray(f.edit_signs) ? f.edit_signs.filter(Boolean).slice(0, 3) : [];
   if (edits.length) add("warn", `Possible editing: ${edits.join("; ")}`);
 
@@ -719,7 +833,8 @@ export async function checkSlip({ imageBuffer, mediaType = "image/jpeg", expecte
     const { findSlipsByTxn, findSlipsByFingerprint, appendSlipRow } = await import("./sheets.js");
     const { readSlipQr } = await import("./slipqr.js");
     // Read the printed text and the QR at the same time; the QR gives the exact transaction number.
-    const [read, qr] = await Promise.all([readSlip(imageBuffer, mediaType), readSlipQr(imageBuffer)]);
+    const qrP = readSlipQr(imageBuffer);
+    const [read, qr] = await Promise.all([readSlipFull(imageBuffer, mediaType, qrP), qrP]);
     const fields = applyQr(read, qr);
     const key = txnKeyOf(fields.transaction_id);
     const fpKey = fpKeyOf(fields);
