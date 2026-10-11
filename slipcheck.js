@@ -480,23 +480,18 @@ export function parseBurmeseDateTime(s) {
   return `${y[1]}-${p2(mon[1])}-${p2(day)}T${p2(h)}:${p2(mi)}:00`;
 }
 
-/** Use the exactly-converted printed amount/time instead of the model's own conversion. A mismatch means the
- *  reader could not settle on the digits, so those fields are dropped and listed in `unsure`. */
+/** Use the exactly-converted printed amount/time instead of the model's own conversion (the model's
+ *  Burmese-to-Latin conversion is what goes wrong). Whether the TRANSCRIPTION is right is then settled
+ *  by the second reading in reconcile(). */
 export function normalizeBurmese(fields) {
   const f = { ...fields, unsure: [...(fields.unsure || [])] };
   if (HAS_BURMESE_DIGIT.test(String(f.amount_as_printed || ""))) {
     const p = parseBurmeseAmount(f.amount_as_printed);
-    if (p != null) {
-      if (f.amount != null && Math.abs(Number(f.amount) - p) > 0.5) { f.amount = null; f.unsure.push("amount"); }
-      else f.amount = p;
-    }
+    if (p != null) f.amount = p;
   }
   if (f.datetime_as_printed) {
     const iso = parseBurmeseDateTime(f.datetime_as_printed);
-    if (iso) {
-      if (f.transaction_datetime && String(f.transaction_datetime).slice(0, 16) !== iso.slice(0, 16)) { delete f.transaction_datetime; f.unsure.push("time"); }
-      else f.transaction_datetime = iso;
-    }
+    if (iso) f.transaction_datetime = iso;
   }
   return f;
 }

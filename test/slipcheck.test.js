@@ -342,14 +342,11 @@ test("Burmese digits are converted exactly, in code", () => {
   assert.equal(parseBurmeseDateTime("garbled"), null);
 });
 
-test("a model that mis-converted the amount or time is caught", () => {
-  const ok = normalizeBurmese({ amount: 6500, amount_as_printed: "၆,၅၀၀.၀၀", transaction_datetime: "2026-03-05T18:22:00", datetime_as_printed: "၀၅ မတ် ၂၀၂၆ • ၆:၂၂ ညနေ" });
-  assert.equal(ok.amount, 6500);
-  assert.deepEqual(ok.unsure, []);
-  const bad = normalizeBurmese({ amount: 9900, amount_as_printed: "၆,၅၀၀.၀၀", transaction_datetime: "2024-12-06T18:27:00", datetime_as_printed: "၀၅ မတ် ၂၀၂၆ • ၆:၂၂ ညနေ" });
-  assert.equal(bad.amount, null);
-  assert.equal(bad.transaction_datetime, undefined);
-  assert.deepEqual(bad.unsure, ["amount", "time"]);
+test("the model's own Burmese conversion is replaced by the exact one", () => {
+  const f = normalizeBurmese({ amount: 9900, amount_as_printed: "၆,၅၀၀.၀၀", transaction_datetime: "2024-12-06T18:27:00", datetime_as_printed: "၀၅ မတ် ၂၀၂၆ • ၆:၂၂ ညနေ" });
+  assert.equal(f.amount, 6500);
+  assert.equal(f.transaction_datetime, "2026-03-05T18:22:00");
+  assert.deepEqual(f.unsure, []);
 });
 
 test("two readings must agree; disagreement is dropped and flagged", () => {
