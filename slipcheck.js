@@ -225,6 +225,8 @@ export async function readSlip(imageBuffer, mediaType = "image/jpeg") {
   });
 }
 
+const noForcedTool = new Set(); // models that rejected tool_choice "tool"
+
 async function readSlipOnce(imageBuffer, mediaType, outerSignal, provider) {
   const c = { ...cfg(), ...(provider || {}) };
   const ctrl = new AbortController();
@@ -232,31 +234,41 @@ async function readSlipOnce(imageBuffer, mediaType, outerSignal, provider) {
   const onOuter = () => ctrl.abort("cancelled");
   if (outerSignal) outerSignal.addEventListener("abort", onOuter, { once: true });
   try {
-    const res = await fetch(`${c.baseUrl}/v1/messages`, {
-      method: "POST",
-      signal: ctrl.signal,
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": c.apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: c.model,
-        max_tokens: 700,
-        system: SYSTEM_PROMPT,
-        tools: [SLIP_TOOL],
-        tool_choice: { type: "tool", name: "record_slip" },
-        messages: [
-          {
-            role: "user",
-            content: [
-              { type: "image", source: { type: "base64", media_type: mediaType, data: imageBuffer.toString("base64") } },
-              { type: "text", text: "Read this payment slip." },
-            ],
-          },
-        ],
-      }),
-    });
+    const send = (toolChoice) =>
+      fetch(`${c.baseUrl}/v1/messages`, {
+        method: "POST",
+        signal: ctrl.signal,
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": c.apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: c.model,
+          max_tokens: 700,
+          system: SYSTEM_PROMPT,
+          tools: [SLIP_TOOL],
+          tool_choice: toolChoice,
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "image", source: { type: "base64", media_type: mediaType, data: imageBuffer.toString("base64") } },
+                { type: "text", text: "Read this payment slip." },
+              ],
+            },
+          ],
+        }),
+      });
+    // Some newer models refuse a forced tool call; for those we ask nicely instead ("auto") and remember it.
+    let res = await send(noForcedTool.has(c.model) ? { type: "auto" } : { type: "tool", name: "record_slip" });
+    if (res.status === 400 && !noForcedTool.has(c.model)) {
+      const body = await res.clone().text().catch(() => "");
+      if (/tool_choice/i.test(body)) {
+        noForcedTool.add(c.model);
+        res = await send({ type: "auto" });
+      }
+    }
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       noteApiFailure(res.status, body, provider?.name || "");
