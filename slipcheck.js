@@ -161,6 +161,9 @@ const SYSTEM_PROMPT =
   "On Wave slips the card near the top shows the receiver's name and full phone number (report both), and every detail row sits below it: always report the receiver, the date/time and the transaction ID when they are visible, even on a photo of a phone screen. " +
   "Always also fill amount_as_printed, datetime_as_printed and digits_script by copying the printed characters exactly, glyph by glyph, " +
   "BEFORE converting anything: Burmese digits ၀၁၂၃၄၅၆၇၈၉ are 0 1 2 3 4 5 6 7 8 9, and ၆ (6) and ၉ (9) are easy to confuse, so look at each glyph twice. " +
+  "Wave's own font draws some Burmese digits oddly: ၂ (2) looks like a hooked Latin letter J, ၀ (0) like a round O or 0, ၅ (5) like a small hooked 9. " +
+  "Never put Latin letters such as J or O in an amount; read them as ၂ and ၀ (so a big \"J5,000.00\"-looking amount is ၂၅,၀၀၀ = 25000). " +
+  "The amount appears twice on a Wave slip (large at the top and again in the ပမာဏ row): read both and report the one you can read most clearly. " +
   "Copy transaction numbers digit by digit; do not group or " +
   "round them, and if any digit is unclear lower the legibility. " +
   "Always answer by calling record_slip.";
