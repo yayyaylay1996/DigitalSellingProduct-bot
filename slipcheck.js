@@ -669,6 +669,12 @@ export function evaluateSlip(f, ctx) {
   if (f.legibility === "unreadable") add("warn", "Slip is too blurry to read reliably — check it by eye");
   else if (f.legibility === "partly_unclear") add("warn", "Parts of the slip are unclear — double-check the numbers");
   if (f.unsure?.length) add("warn", `Two readings of this slip disagreed on the ${f.unsure.join(" and ")} — check ${f.unsure.length > 1 ? "them" : "it"} by eye`);
+  // Burmese-script digits on a picture: the reader has been seen misreading
+  // them the SAME way on every attempt (e.g. 6,500 read as 9,900), so two
+  // agreeing readings prove nothing. Never let such a slip come out green.
+  if ((f.digits_script === "burmese" || f.digits_script === "mixed") && f.txn_source !== "qr") {
+    add("warn", "Numbers are printed in Burmese digits — the AI can misread these. Check the amount and date by eye against your bank app");
+  }
   const edits = Array.isArray(f.edit_signs) ? f.edit_signs.filter(Boolean).slice(0, 3) : [];
   if (edits.length) add("warn", `Possible editing: ${edits.join("; ")}`);
 

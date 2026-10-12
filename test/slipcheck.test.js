@@ -369,3 +369,9 @@ test("only Wave / Burmese-digit slips without a QR get a second opinion", () => 
   assert.equal(needsSecondOpinion({ provider: "KBZPay", amount_as_printed: "12,000.00" }, null), false);
   assert.equal(needsSecondOpinion({ provider: "KBZPay", digits_script: "burmese" }, null), true);
 });
+
+test("Burmese digits on a picture never come out green", () => {
+  const r = evaluateSlip({ ...slip1, digits_script: "burmese", txn_source: "image" }, base());
+  assert.notEqual(r.level, "ok");
+  assert.ok(r.checks.some((c) => /Burmese digits/.test(c.text)));
+});
