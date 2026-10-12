@@ -373,5 +373,12 @@ test("only Wave / Burmese-digit slips without a QR get a second opinion", () => 
 test("Burmese digits on a picture never come out green", () => {
   const r = evaluateSlip({ ...slip1, digits_script: "burmese", txn_source: "image" }, base());
   assert.notEqual(r.level, "ok");
-  assert.ok(r.checks.some((c) => /Burmese digits/.test(c.text)));
+  assert.ok(r.checks.some((c) => /Burmese-digit/.test(c.text)));
+});
+
+test("Wave slip with Burmese printed digits is warned even if digits_script is missing", () => {
+  const f = { ...slip1, provider: "Wave Money", amount_as_printed: "၂၅,၀၀၀.၀၀", txn_source: "image" };
+  delete f.digits_script;
+  const r = evaluateSlip(f, base());
+  assert.notEqual(r.level, "ok");
 });

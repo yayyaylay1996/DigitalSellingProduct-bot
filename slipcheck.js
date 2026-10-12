@@ -675,8 +675,9 @@ export function evaluateSlip(f, ctx) {
   // Burmese-script digits on a picture: the reader has been seen misreading
   // them the SAME way on every attempt (e.g. 6,500 read as 9,900), so two
   // agreeing readings prove nothing. Never let such a slip come out green.
-  if ((f.digits_script === "burmese" || f.digits_script === "mixed") && f.txn_source !== "qr") {
-    add("warn", "Numbers are printed in Burmese digits — the AI can misread these. Check the amount and date by eye against your bank app");
+  const printedNonLatin = /[\u1040-\u1049\u0966-\u096F]/.test(`${f.amount_as_printed || ""} ${f.datetime_as_printed || ""}`);
+  if ((f.digits_script === "burmese" || f.digits_script === "mixed" || printedNonLatin || /wave/i.test(String(f.provider || ""))) && f.txn_source !== "qr") {
+    add("warn", "Wave / Burmese-digit slip — the AI can misread these numbers. Check the amount and date by eye against your bank app");
   }
   const edits = Array.isArray(f.edit_signs) ? f.edit_signs.filter(Boolean).slice(0, 3) : [];
   if (edits.length) add("warn", `Possible editing: ${edits.join("; ")}`);
