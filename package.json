@@ -9,7 +9,8 @@
   },
   "scripts": {
     "start": "node index.js",
-    "test": "node --test"
+    "test": "node --test",
+    "start:staff": "node staff-bot.js"
   },
   "repository": {
     "type": "git",
