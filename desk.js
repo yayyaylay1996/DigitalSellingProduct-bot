@@ -22,6 +22,7 @@
  */
 import "dotenv/config";
 import { google } from "googleapis";
+import { expiryFor } from "./sheets.js";
 
 const DESK_ID = process.env.DESK_SHEET_ID || "";
 
@@ -50,6 +51,10 @@ function client() {
   sheetsClient = google.sheets({ version: "v4", auth });
   return sheetsClient;
 }
+
+/** The authenticated Sheets client, for desk-catalog.js. */
+export const deskSheets = client;
+export const DESK_SHEET = () => DESK_ID;
 
 /** True when a Desk sheet is configured at all. */
 export function deskEnabled() {
@@ -260,6 +265,97 @@ export async function pushOrderToDesk({ order, product, seller, zoomEmail }) {
     return { ok: true, no, item: product.deskItem };
   } catch (e) {
     console.error("pushOrderToDesk:", e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+// ─── staff-bot orders (one payment → several Desk rows) ──────────────────────
+
+// Column U on the Orders tab, added for the staff bot: "KPay · S-8F3K" = how it was
+// paid + the basket reference that also appears in the Slips ledger. Everything in
+// A–T stays exactly as the Desk expects it.
+const DESK_RANGE_WITH_PAYMENT = "Orders!A:U";
+
+/**
+ * One Desk row for one line of a staff basket. Pure (no Google), so it is tested.
+ *
+ *   line  – { item, access, duration, price, email, track }   (names already canonical)
+ *   draft – { source, customer, payment, ref }
+ * `includePayment` false → the usual 20 cells (the Desk has no Payment column yet).
+ */
+export function buildStaffDeskRow({ no, line, draft, dateTime, seller, includePayment = true }) {
+  const row = [
+    no, // A  No
+    toDeskDate(dateTime), // B  Date          DD/MM/YYYY
+    draft.customer, // C  Customer
+    toDeskTime(dateTime), // D  Start Time    HH:MM
+    "", // E  End Time
+    draft.source, // F  Source        chosen in the bot, a Config value
+    line.item, // G  Item          a Config value, exactly
+    seller, // H  Seller Name   the staff member
+    "", // I  Supplier      the bot doesn't know this
+    toMoney(line.price), // J  Price         this line's own price
+    line.access, // K  Share/Private
+    "Done", // L  Payment check  an approver confirmed the slip
+    line.duration, // M  Duration
+    line.email || "", // N  Zoom Email
+    0, // O  Purchase Price
+    line.track !== false, // P  Track         from Config, so Renewals sees it
+    toDeskExpiry(expiryFor(dateTime, line.duration)), // Q  Expiry Date   YYYY-MM-DD
+    "", // R  Renewal Status
+    "", // S  Contacted On
+    false, // T  Reminder
+  ];
+  if (includePayment) row.push(`${draft.payment} · ${draft.ref}`); // U  Payment
+  return row;
+}
+
+/** True when Orders!U1 says "Payment" (checked once, then remembered). */
+let hasPaymentColumn = null;
+export async function deskHasPaymentColumn(sheets = client(), { force = false } = {}) {
+  if (hasPaymentColumn === true && !force) return true;
+  try {
+    const res = await sheets.spreadsheets.values.get({ spreadsheetId: DESK_ID, range: "Orders!U1" });
+    const v = String(res.data.values?.[0]?.[0] || "").trim().toLowerCase();
+    hasPaymentColumn = v === "payment";
+  } catch {
+    hasPaymentColumn = false;
+  }
+  return hasPaymentColumn;
+}
+
+// Two baskets approved at the same moment must not both read the same "next No".
+let writeChain = Promise.resolve();
+
+/**
+ * Write every line of an approved basket as its own Desk row, in ONE append (all
+ * rows or none). Never throws: { ok, nos, paymentColumn } or { ok:false, error }.
+ */
+export function pushBasketToDesk({ draft, seller, dateTime }) {
+  const job = writeChain.then(() => pushBasketNow({ draft, seller, dateTime }));
+  writeChain = job.catch(() => {});
+  return job;
+}
+
+async function pushBasketNow({ draft, seller, dateTime }) {
+  if (!deskEnabled()) return { ok: false, skipped: "DESK_SHEET_ID not set" };
+  if (!draft?.lines?.length) return { ok: false, error: "empty basket" };
+  try {
+    const sheets = client();
+    const includePayment = await deskHasPaymentColumn(sheets);
+    const first = await nextDeskNo(sheets);
+    const rows = draft.lines.map((line, i) =>
+      buildStaffDeskRow({ no: first + i, line, draft, dateTime, seller, includePayment })
+    );
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: DESK_ID,
+      range: includePayment ? DESK_RANGE_WITH_PAYMENT : DESK_RANGE,
+      valueInputOption: "USER_ENTERED",
+      requestBody: { values: rows },
+    });
+    return { ok: true, nos: rows.map((r) => r[0]), paymentColumn: includePayment };
+  } catch (e) {
+    console.error("pushBasketToDesk:", e.message);
     return { ok: false, error: e.message };
   }
 }

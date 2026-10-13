@@ -33,6 +33,36 @@ can't send slips; their photos are never checked.
 3. Read the reply: 🟢 all match · 🟡 check by eye · 🔴 problem, don't approve · ⚠️ couldn't read.
    Wave slips are always 🟡 — check them in the Wave app.
 
+## Entering an order (`/order`)
+
+For orders from TikTok / Viber / Telegram pages that staff enter themselves. Type `/order`, then tap:
+
+1. **Source** (the Desk's Source list) → **payment method** (KPay, Wave …) → type the **customer**
+   name / @username.
+2. **Product** → **plan** (Access · Duration · list price from the Desk's `Prices` tab) → **amount**:
+   the list price in one tap, or type it. A plan that isn't on the price list: "တခြား plan" →
+   pick Access and Duration, then type the amount. Zoom-type products (Config "Needs Email") ask for
+   the customer's email (can be skipped and added later).
+3. **➕ Product ထပ်ထည့်** for the same payment — up to **10 products** on one slip.
+4. **✅ ပြီးပြီ — slip ပို့မယ်**, then send the slip photo **once**. It is checked against the **basket
+   total**. A mismatch is a warning the approver sees (🔴/🟡), never a hard stop.
+5. An approver taps ✅ → the Order Desk gets **one row per product** (same customer, source, payment
+   and slip), with Payment check = Done. ❌ writes nothing; staff can send a better slip into the same
+   order, or `/cancel`.
+
+The Desk's **Payment** column (U) holds `KPay · S-8F3K`: how it was paid + the basket reference. The
+same reference is in the Slips sheet's "Ref" column, so a slip and its Desk rows can be matched.
+Add the column once with `node desk-add-payment-column.mjs` (preview) then `--write`. Until then the
+bot still works and just leaves the payment out.
+
+Everything offered (products, sources, access, durations) comes from the Desk's `Config` tab (Active
+rows only) and the `Prices` tab, spelled exactly as Config spells them. Prices for a product that
+isn't an Active Config item are ignored. Staff in a private chat who can't press ✅/❌: the verdict is
+sent to the approvers (they must have pressed /start in the bot once) and the result comes back.
+
+Order drafts live in memory: a restart or ~3 hours idle drops them. Not yet handled: Supplier column
+(left blank), Purchase Price (0), and the Desk's 14-day Zoom calendar reminder (see below).
+
 ## What approvers do
 
 Open Bank/Wave and confirm the money arrived, then tap under the verdict:
@@ -81,7 +111,8 @@ them, so the bot can't tell staff from anyone else.
 
 - Wave photos in Burmese digits can be misread → always yellow, check in the Wave app.
 - No received-money matching yet. Green means "the slip looks right", not "money is in".
-- Approval is recorded in the chat only; it isn't linked to an order, the Order Desk or the shop bot.
+- Approval of a plain photo-check is recorded in the chat only. Approval of an `/order` also writes the Order Desk rows.
+- The Desk's Apps Script only creates the 14-day Zoom reminder for rows whose Seller is `Bot`. Staff-bot rows have the staff member as Seller, so they get no automatic reminder until `apps-script/BotSync.gs` is changed to also accept rows with a `· S-` reference in the Payment column.
 - The in-memory duplicate guard is per process; across the two bots the Slips sheet is what
   catches reuse, so two copies of one slip sent within a second or two could both slip through.
 - Pressed-button state is kept in memory: if the bot restarts, buttons already removed stay removed,
