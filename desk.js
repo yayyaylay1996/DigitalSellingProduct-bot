@@ -22,7 +22,7 @@
  */
 import "dotenv/config";
 import { google } from "googleapis";
-import { expiryFor } from "./sheets.js";
+import { expiryFor, loadCredentials } from "./sheets.js";
 
 const DESK_ID = process.env.DESK_SHEET_ID || "";
 
@@ -40,12 +40,8 @@ let sheetsClient = null;
 function client() {
   if (sheetsClient) return sheetsClient;
   const auth = new google.auth.GoogleAuth({
-    credentials: {
-      client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-      private_key: (process.env.GOOGLE_PRIVATE_KEY || "")
-        .replace(/^["']|["']$/g, "")
-        .replace(/\\n/g, "\n"),
-    },
+    // The same credential lookup as the bot's own sheet (env vars, GOOGLE_CREDENTIALS_JSON, or the key file).
+    credentials: loadCredentials(),
     scopes: ["https://www.googleapis.com/auth/spreadsheets"],
   });
   sheetsClient = google.sheets({ version: "v4", auth });

@@ -16,7 +16,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * NOT exist on a deployed server. Without the env-var paths below the bot would
  * start fine locally and then crash on boot in the cloud.
  */
-function loadCredentials() {
+export function loadCredentials() {
   const client_email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
   const rawKey = process.env.GOOGLE_PRIVATE_KEY;
 

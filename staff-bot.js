@@ -156,7 +156,8 @@ async function startOrder(msg) {
       catalog = await loadCatalog();
     } catch (e) {
       console.warn("catalog load failed:", e.message);
-      return bot.sendMessage(chatId, PROMPT.noCatalog);
+      // Show the reason too (short, no secrets) so it can be fixed without digging through logs.
+      return bot.sendMessage(chatId, `${PROMPT.noCatalog}\n\n(${String(e.message).slice(0, 200)})`);
     }
     const old = openDraftOf(msg.from, chatId);
     if (old) {
