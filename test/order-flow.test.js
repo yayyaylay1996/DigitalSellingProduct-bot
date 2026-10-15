@@ -234,7 +234,7 @@ test("order: undo removes the last product; back from the slip step returns to t
   assert.equal(d.lines.length, 0);
   assert.equal(d.step, "item");
   d = tap(d, "itm", 0); d = tap(d, "opt", 0); d = tap(d, "amt", "auto"); d = tap(d, "done");
-  d = tap(d, "back");
+  d = tap(d, "bk");
   assert.equal(d.step, "basket");
 });
 
@@ -347,4 +347,124 @@ test("orderDecisionText: written rows with a range, missing Payment column noted
 test("yangonNow: YYYY-MM-DD HH:MM in Myanmar time", () => {
   assert.equal(yangonNow(new Date("2026-10-13T00:00:00Z")), "2026-10-13 06:30");
   assert.equal(yangonNow(new Date("2026-10-13T18:00:00Z")), "2026-10-14 00:30");
+});
+
+// ─── ⬅️ Back ─────────────────────────────────────────────────────────────────
+
+const bk = (d, c = catalog()) => tap(d, "bk", "", c);
+
+test("back: undoes one choice at a time from source to item", () => {
+  let d = newDraft({ id: "ABCD", ownerId: 7, ownerName: "Mg", chatId: 1 });
+  assert.ok(applyAction(d, { action: "bk" }, catalog()).toast, "nowhere to go back from the first step");
+  d = tap(d, "src", 0); d = tap(d, "pay", 1);
+  d = applyText(d, "Aye").draft;
+  assert.equal(d.step, "item");
+  d = bk(d); assert.equal(d.step, "customer");
+  d = applyText(d, "Aye Aye").draft; assert.equal(d.customer, "Aye Aye"); // retyping replaces the name
+  d = bk(bk(d)); assert.equal(d.step, "payment"); assert.equal(d.payment, "");
+  d = bk(d); assert.equal(d.step, "source"); assert.equal(d.source, "");
+});
+
+test("back: through the list-price path (item → plan → amount → typed amount)", () => {
+  let d = upToItem();
+  d = tap(d, "itm", 0);
+  assert.equal(bk(d).step, "item");
+  assert.equal(bk(d).pending, null);
+  d = tap(d, "opt", 0);
+  const fromAmount = bk(d);
+  assert.equal(fromAmount.step, "option");
+  assert.deepEqual(fromAmount.pending, { item: "Capcut", needsEmail: false, track: true }); // plan choice undone, item kept
+  d = tap(d, "amt", "man");
+  assert.equal(bk(d).step, "amount"); // typed-amount → back to the list price / typed choice
+  assert.equal(bk(d).pending.listPrice, 25000);
+});
+
+test("back: an option without a price returns to the plan list", () => {
+  const c = catalog();
+  c.options.Netflix.push({ access: "Private", duration: "3Month", price: null });
+  let d = upToItem();
+  d = tap(d, "itm", 1, c); d = tap(d, "opt", 1, c);
+  assert.equal(d.step, "amount_text");
+  const b = bk(d, c);
+  assert.equal(b.step, "option");
+  assert.equal(b.pending.access, undefined);
+});
+
+test("back: manual plan path walks Access ← Duration ← typed amount, keeping what is still valid", () => {
+  let d = upToItem();
+  d = tap(d, "itm", 1); d = tap(d, "mo");
+  assert.equal(bk(d).step, "option"); // the item has a price list, so back from Access shows it again
+  d = tap(d, "acc", 1); d = tap(d, "dur", 2);
+  assert.equal(d.step, "amount_text");
+  const toDuration = bk(d);
+  assert.equal(toDuration.step, "duration");
+  assert.equal(toDuration.pending.access, "Private");
+  assert.equal(toDuration.pending.duration, undefined);
+  const toAccess = bk(toDuration);
+  assert.equal(toAccess.step, "access");
+  assert.equal(toAccess.pending.access, undefined);
+  // and the corrected choice still ends in the right line
+  let e = tap(toDuration, "dur", 1);
+  e = applyText(e, "9000").draft;
+  assert.deepEqual(e.lines[0], { item: "Netflix", access: "Private", duration: "3Month", price: 9000, email: "", track: true });
+});
+
+test("back: a product with no price list goes back to the product list from Access", () => {
+  let d = upToItem();
+  d = tap(d, "itm", 3); // Wink
+  assert.equal(d.step, "access");
+  const b = bk(d);
+  assert.equal(b.step, "item");
+  assert.equal(b.pending, null);
+});
+
+test("back: email step returns to the amount that was given; nothing is added to the basket", () => {
+  let d = upToItem();
+  d = tap(d, "itm", 2); d = tap(d, "acc", 1); d = tap(d, "dur", 1);
+  d = applyText(d, "20000").draft;
+  assert.equal(d.step, "email");
+  const b = bk(d);
+  assert.equal(b.step, "amount_text");
+  assert.equal(b.pending.price, undefined);
+  assert.equal(b.lines.length, 0);
+  // list-price route: back lands on the amount choice
+  const c = catalog();
+  c.options["Zoom Choice1"] = [{ access: "Private", duration: "1Month", price: 20000 }];
+  let z = upToItem();
+  z = tap(z, "itm", 2, c); z = tap(z, "opt", 0, c); z = tap(z, "amt", "auto", c);
+  assert.equal(z.step, "email");
+  assert.equal(bk(z, c).step, "amount");
+});
+
+test("back: with products already in the basket, the product list goes back to the basket", () => {
+  let d = upToItem();
+  d = tap(d, "itm", 0); d = tap(d, "opt", 0); d = tap(d, "amt", "auto");
+  d = tap(d, "add");
+  assert.equal(d.step, "item");
+  const b = bk(d);
+  assert.equal(b.step, "basket");
+  assert.equal(b.lines.length, 1);
+});
+
+test("back: slip step returns to the basket; basket has its own undo instead", () => {
+  let d = upToItem();
+  d = tap(d, "itm", 0); d = tap(d, "opt", 0); d = tap(d, "amt", "auto"); d = tap(d, "done");
+  d = bk(d);
+  assert.equal(d.step, "basket");
+  assert.ok(applyAction(d, { action: "bk" }, catalog()).toast);
+});
+
+test("render: every step after the first has a Back button; the first and the basket do not", () => {
+  const c = catalog();
+  const hasBack = (d) => render(d, c).rows.flat().some((b) => /:bk$/.test(b.callback_data));
+  let d = newDraft({ id: "ABCD", ownerId: 7, ownerName: "Mg", chatId: 1 });
+  assert.equal(hasBack(d), false);
+  d = tap(d, "src", 0); assert.equal(hasBack(d), true); // payment
+  d = tap(d, "pay", 0); assert.equal(hasBack(d), true); // customer
+  d = applyText(d, "Aye").draft; assert.equal(hasBack(d), true); // item
+  d = tap(d, "itm", 0); assert.equal(hasBack(d), true); // option
+  d = tap(d, "opt", 0); assert.equal(hasBack(d), true); // amount
+  d = tap(d, "amt", "man"); assert.equal(hasBack(d), true); // amount_text
+  d = applyText(d, "5000").draft; assert.equal(hasBack(d), false); // basket (has Undo)
+  d = tap(d, "done"); assert.equal(hasBack(d), true); // slip
 });

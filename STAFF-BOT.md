@@ -37,6 +37,8 @@ can't send slips; their photos are never checked.
 
 For orders from TikTok / Viber / Telegram pages that staff enter themselves. Start it from the bot's **Menu** button (☰ next to the message box) → *Order အသစ် ထည့်မယ်*, or the **🛒 Order ထည့်မယ်** button that appears after `/start` in a private chat, or type `/order`. Then tap:
 
+**မှားနှိပ်မိရင်:** အဆင့်တိုင်းမှာ **⬅️ နောက်သို့** ခလုတ်ရှိပါတယ်၊ တစ်ဆင့်ချင်း နောက်ပြန်ပြီး ပြန်ရွေးလို့ရပါတယ်။ ပြီးသွားတဲ့ product ကို ဖျက်ချင်ရင် basket မှာ **↩️ နောက်ဆုံးတစ်ခု ဖျက်** ကို သုံးပါ။
+
 1. **Source** (the Desk's Source list) → **payment method** (KPay, Wave …) → type the **customer**
    name / @username.
 2. **Product** → **plan** (Access · Duration · list price from the Desk's `Prices` tab) → **amount**:

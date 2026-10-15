@@ -84,7 +84,7 @@ export function pickOption(d, option) {
 }
 
 /** "Other plan": the product has no usable price-list row, so pick Access then Duration by hand. */
-export const startManualOption = (d) => (d.pending ? { ...d, step: "access" } : null);
+export const startManualOption = (d) => (d.pending ? { ...d, pending: { ...d.pending, manual: true }, step: "access" } : null);
 export const pickAccess = (d, access) => (d.pending && access ? { ...d, pending: { ...d.pending, access }, step: "duration" } : null);
 export const pickDuration = (d, duration) =>
   d.pending && duration ? { ...d, pending: { ...d.pending, duration, listPrice: null }, step: "amount_text" } : null;
@@ -205,9 +205,11 @@ export const chunk = (arr, n) => {
   return out;
 };
 const cancelRow = (d) => [btn("🗑 မလုပ်တော့ဘူး", cb(d, "cancel"))];
+/** ⬅️ နောက်သို့ (one step back) next to cancel, on every step after the first. */
+const navRow = (d) => [btn("⬅️ နောက်သို့", cb(d, "bk")), btn("🗑 မလုပ်တော့ဘူး", cb(d, "cancel"))];
 
 export const sourceRows = (d, sources) => [...chunk(sources.map((s, i) => btn(s, cb(d, "src", i))), 3), cancelRow(d)];
-export const paymentRows = (d, payments) => [...chunk(payments.map((p, i) => btn(p, cb(d, "pay", i))), 3), cancelRow(d)];
+export const paymentRows = (d, payments) => [...chunk(payments.map((p, i) => btn(p, cb(d, "pay", i))), 3), navRow(d)];
 
 /** Product list, a page at a time. Callback carries the index into the full list. */
 export function itemRows(d, items, page = 0) {
@@ -222,7 +224,7 @@ export function itemRows(d, items, page = 0) {
     if (p < pages - 1) nav.push(btn("▶️", cb(d, "pg", p + 1)));
     rows.push(nav);
   }
-  rows.push(cancelRow(d));
+  rows.push(navRow(d));
   return rows;
 }
 
@@ -232,19 +234,19 @@ export const optionRows = (d, options) => [
     [btn([o.access, o.duration].filter(Boolean).join(" · ") + (o.price ? ` · ${fmt(o.price)}` : " · (ဈေးမရှိ)"), cb(d, "opt", i))]
   ),
   [btn("✏️ တခြား plan (ကိုယ်တိုင်ရွေး)", cb(d, "mo"))],
-  cancelRow(d),
+  navRow(d),
 ];
 
-export const accessRows = (d, accesses) => [...chunk(accesses.map((a, i) => btn(a, cb(d, "acc", i))), 3), cancelRow(d)];
-export const durationRows = (d, durations) => [...chunk(durations.map((x, i) => btn(x, cb(d, "dur", i))), 3), cancelRow(d)];
-export const emailRows = (d) => [[btn("နောက်မှ ထည့်မယ်", cb(d, "skip"))], cancelRow(d)];
+export const accessRows = (d, accesses) => [...chunk(accesses.map((a, i) => btn(a, cb(d, "acc", i))), 3), navRow(d)];
+export const durationRows = (d, durations) => [...chunk(durations.map((x, i) => btn(x, cb(d, "dur", i))), 3), navRow(d)];
+export const emailRows = (d) => [[btn("နောက်မှ ထည့်မယ်", cb(d, "skip"))], navRow(d)];
 
 export function amountRows(d) {
   const rows = [];
   const lp = d.pending?.listPrice;
   if (lp) rows.push([btn(`💰 ${fmt(lp)} (စာရင်းဈေး)`, cb(d, "amt", "auto"))]);
   rows.push([btn("✏️ ကိုယ်တိုင် ရိုက်မယ်", cb(d, "amt", "man"))]);
-  rows.push(cancelRow(d));
+  rows.push(navRow(d));
   return rows;
 }
 
@@ -283,29 +285,62 @@ export const textStep = (d) => d.step === "customer" || d.step === "amount_text"
 export function render(d, catalog) {
   const head = basketText(d);
   const say = (prompt, rows) => ({ text: `${head}\n\n${prompt}`, rows });
-  const cancelOnly = [cancelRow(d)];
+  const navOnly = [navRow(d)];
   switch (d.step) {
     case "source": return say(PROMPT.source, sourceRows(d, catalog.sources));
     case "payment": return say(PROMPT.payment, paymentRows(d, catalog.payments));
-    case "customer": return say(PROMPT.customer, cancelOnly);
+    case "customer": return say(PROMPT.customer, navOnly);
     case "item": return say(PROMPT.item, itemRows(d, catalog.items.map((i) => i.name), d.page || 0));
     case "option": return say(PROMPT.option, optionRows(d, catalog.options[d.pending?.item] || []));
     case "access": return say(PROMPT.access, accessRows(d, catalog.accesses));
     case "duration": return say(PROMPT.duration, durationRows(d, catalog.durations));
     case "amount": return say(PROMPT.amount, amountRows(d));
-    case "amount_text": return say(PROMPT.amountText, cancelOnly);
+    case "amount_text": return say(PROMPT.amountText, navOnly);
     case "email": return say(PROMPT.email, emailRows(d));
     case "basket": return say(PROMPT.basket, basketRows(d));
-    case "slip": return say(PROMPT.slip(d), [[btn("↩️ Basket ပြန်ပြင်", cb(d, "back"))], cancelRow(d)]);
+    case "slip": return say(PROMPT.slip(d), [[btn("⬅️ Basket ပြန်ပြင်", cb(d, "bk"))], cancelRow(d)]);
     default: return { text: head, rows: [] };
   }
 }
 
+/** What the person had chosen before this line started (kept when stepping back inside a line). */
+const baseOf = (p) => ({ item: p.item, needsEmail: p.needsEmail, track: p.track });
+
+/**
+ * One step back, undoing only the choice made on the current step. null when there is
+ * nowhere to go back to. Pure, so every path is covered by tests.
+ */
+export function goBack(d, catalog) {
+  const p = d.pending;
+  switch (d.step) {
+    case "payment": return { ...d, source: "", step: "source" };
+    case "customer": return { ...d, payment: "", step: "payment" };
+    case "item": return d.lines.length ? { ...d, step: "basket" } : { ...d, step: "customer" };
+    case "option": return { ...d, pending: null, step: "item" };
+    case "access":
+      return catalog?.options?.[p?.item]?.length
+        ? { ...d, pending: baseOf(p), step: "option" }
+        : { ...d, pending: null, step: "item" };
+    case "duration": return { ...d, pending: { ...baseOf(p), manual: true }, step: "access" };
+    case "amount": return { ...d, pending: baseOf(p), step: "option" };
+    case "amount_text":
+      if (p?.manual) return { ...d, pending: { ...baseOf(p), manual: true, access: p.access }, step: "duration" };
+      return p?.listPrice ? { ...d, step: "amount" } : { ...d, pending: baseOf(p), step: "option" };
+    case "email": {
+      const { price, ...rest } = p || {};
+      return { ...d, pending: rest, step: rest.listPrice ? "amount" : "amount_text" };
+    }
+    case "slip": return { ...d, step: "basket" };
+    default: return null;
+  }
+}
+
 /** Which step each button belongs to. A tap on an older panel is refused, not guessed at. */
+const BACK_STEPS = new Set(["payment", "customer", "item", "option", "access", "duration", "amount", "amount_text", "email", "slip"]);
 const ACTION_STEP = {
   src: "source", pay: "payment", itm: "item", pg: "item", opt: "option", mo: "option",
   acc: "access", dur: "duration", amt: "amount", skip: "email",
-  add: "basket", done: "basket", undo: "basket", back: "slip",
+  add: "basket", done: "basket", undo: "basket",
 };
 
 /**
@@ -316,7 +351,10 @@ export function applyAction(d, { action, arg = "" }, catalog) {
   if (action === "cancel") return { cancel: true };
   if (action === "noop") return { draft: d };
   const stale = { draft: d, toast: PROMPT.stale };
-  if (action === "undo" && d.step === "slip") return stale;
+  if (action === "bk") {
+    const prev = BACK_STEPS.has(d.step) ? goBack(d, catalog) : null;
+    return prev ? { draft: prev } : stale;
+  }
   if (ACTION_STEP[action] !== d.step) return stale;
   const idx = /^\d+$/.test(arg) ? Number(arg) : -1;
   let next = null;
@@ -343,7 +381,6 @@ export function applyAction(d, { action, arg = "" }, catalog) {
     case "add": next = startAnotherItem(d); if (!next) return { draft: d, toast: PROMPT.basketFull }; break;
     case "done": next = readyForSlip(d); break;
     case "undo": next = removeLastLine(d); break;
-    case "back": next = { ...d, step: "basket" }; break;
   }
   return next ? { draft: next } : stale;
 }
