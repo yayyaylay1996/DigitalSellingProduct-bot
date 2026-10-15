@@ -84,6 +84,34 @@ const sellerNames = parseSellerNames(process.env.STAFF_SELLER_NAMES || "");
 
 const bot = new TelegramBot(token, { polling: true });
 bot.on("polling_error", (err) => console.error("Staff bot polling error (will keep retrying):", err.message));
+// The "/" command menu (and the ☰ Menu button in a private chat), so nobody has to type /order.
+const ORDER_BTN = "🛒 Order ထည့်မယ်";
+const COMMANDS = [
+  { command: "order", description: "🛒 Order အသစ် ထည့်မယ် (ခလုတ်တွေနဲ့)" },
+  { command: "cancel", description: "🗑 လုပ်နေတဲ့ order ကို မလုပ်တော့ဘူး" },
+  { command: "help", description: "❓ အသုံးပြုပုံ" },
+  { command: "myid", description: "🆔 ကိုယ့် Telegram ID ကြည့်မယ်" },
+];
+async function registerMenu() {
+  const call = async (method, body) => {
+    const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error(`${method}: ${data.description}`);
+  };
+  try {
+    await call("setMyCommands", { commands: COMMANDS });
+    await call("setChatMenuButton", { menu_button: { type: "commands" } });
+    console.log("Command menu registered (/order, /cancel, /help, /myid).");
+  } catch (e) {
+    console.warn("could not register the command menu:", e.message);
+  }
+}
+registerMenu();
+
 process.on("unhandledRejection", (e) => console.error("unhandledRejection:", e?.message || e));
 
 const HTML = { parse_mode: "HTML", disable_web_page_preview: true };
@@ -176,7 +204,7 @@ async function startOrder(msg) {
   }
 }
 
-bot.onText(/^\/order\b/, async (msg) => {
+bot.onText(/^(\/order\b|🛒 Order ထည့်မယ်$)/, async (msg) => {
   if (!isGroup(msg) && msg.chat.type !== "private") return;
   if (!canSend(msg.from)) {
     if (isGroup(msg)) return;
@@ -341,14 +369,18 @@ bot.onText(/^\/myid\b/, async (msg) => {
 bot.onText(/^\/(start|help)\b/, async (msg) => {
   if (!isGroup(msg) && msg.chat.type !== "private") return;
   const group = isGroup(msg);
-  if (canSend(msg.from)) return bot.sendMessage(msg.chat.id, MSG.welcome, HTML);
+  if (canSend(msg.from)) {
+    // In a private chat, also leave a big "🛒 Order ထည့်မယ်" button above the keyboard.
+    const keyboard = group ? {} : { reply_markup: { keyboard: [[{ text: ORDER_BTN }]], resize_keyboard: true, is_persistent: true } };
+    return bot.sendMessage(msg.chat.id, MSG.welcome, { ...HTML, ...keyboard });
+  }
   if (canApprove(msg.from)) return bot.sendMessage(msg.chat.id, MSG.approverOnly, HTML);
   if (!group) await bot.sendMessage(msg.chat.id, MSG.notAllowed(msg.from?.id), HTML);
 });
 
 bot.on("message", async (msg) => {
   try {
-    if (msg.text?.startsWith("/")) return; // commands handled above
+    if (msg.text?.startsWith("/") || msg.text === ORDER_BTN) return; // commands and the Order button are handled above
     const group = isGroup(msg);
     if (!group && msg.chat.type !== "private") return;
 

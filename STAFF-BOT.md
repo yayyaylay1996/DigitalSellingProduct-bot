@@ -35,7 +35,7 @@ can't send slips; their photos are never checked.
 
 ## Entering an order (`/order`)
 
-For orders from TikTok / Viber / Telegram pages that staff enter themselves. Type `/order`, then tap:
+For orders from TikTok / Viber / Telegram pages that staff enter themselves. Start it from the bot's **Menu** button (☰ next to the message box) → *Order အသစ် ထည့်မယ်*, or the **🛒 Order ထည့်မယ်** button that appears after `/start` in a private chat, or type `/order`. Then tap:
 
 1. **Source** (the Desk's Source list) → **payment method** (KPay, Wave …) → type the **customer**
    name / @username.
