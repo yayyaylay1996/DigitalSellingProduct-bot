@@ -33,6 +33,7 @@ import {
   ensureOrderExpiryColumn,
 } from "./sheets.js";
 import { pushOrderToDesk, deskEnabled, setZoomEmail, markReminderDone } from "./desk.js";
+import { parseSupervisorIds, roleFor, canVerify, decisionLabel, parseGroupId, groupRoleFor } from "./supervisors-lib.js";
 import { createZoomReminder, calendarEnabled } from "./calendar.js";
 import { checkSlip, slipCheckEnabled, onSlipKeyProblem, keyHealth, keyWarning } from "./slipcheck.js";
 
@@ -122,6 +123,39 @@ async function resolveAdminChatId(settings) {
     return adminChatId;
   }
   return null;
+}
+
+// Supervisors: extra people (numeric Telegram IDs in SUPERVISOR_CHAT_IDS) who may press ✅/❌ on an
+// ORDER payslip. Rules live in supervisors-lib.js. Top-ups stay admin-only.
+const { ids: supervisorIds, ignored: supervisorIgnored } = parseSupervisorIds(process.env.SUPERVISOR_CHAT_IDS);
+if (supervisorIgnored.length) {
+  console.warn(`SUPERVISOR_CHAT_IDS: ignored (must be numeric Telegram IDs): ${supervisorIgnored.join(", ")}`);
+}
+if (supervisorIds.length) console.log(`Supervisors for order payslips: ${supervisorIds.length}`);
+
+// Payslip group: optional group chat (SLIP_GROUP_ID, a negative number like -1001234567890) that gets
+// a copy of every ORDER payslip card so staff can see it. Only the admin — matched by Telegram USER
+// id, since in a group the chat id is the group's — can press Verify / No Verify there.
+const SLIP_GROUP_ID = parseGroupId(process.env.SLIP_GROUP_ID);
+if (process.env.SLIP_GROUP_ID && !SLIP_GROUP_ID) {
+  console.warn("SLIP_GROUP_ID ignored: it must be a negative numeric chat id such as -1001234567890");
+}
+if (SLIP_GROUP_ID) console.log("Order payslips are also posted to the payslip group");
+function isSlipGroupChat(chat) {
+  return Boolean(SLIP_GROUP_ID) && String(chat && chat.id) === SLIP_GROUP_ID;
+}
+
+/** "admin" | "supervisor" | null for whoever tapped this button. */
+async function orderRole(query) {
+  if (isSlipGroupChat(query.message.chat)) {
+    return groupRoleFor({ fromId: query.from && query.from.id, adminId: await resolveAdminChatId() });
+  }
+  return roleFor({
+    chatId: query.message.chat.id,
+    chatType: query.message.chat.type,
+    adminId: await resolveAdminChatId(),
+    supervisorIds,
+  });
 }
 
 // Folder holding FAQ answer images (referenced by filename in the FAQ tab).
@@ -1357,8 +1391,11 @@ async function deliverManualOrder(base, product, adminId, meta) {
 
 // `pending` is the in-memory order (from Buy). On Verify we record it to the
 // sheet for the first time; on No Verify / Cancel it's dropped, never recorded.
-async function handleVerify(query, pending) {
-  const adminId = query.message.chat.id;
+async function handleVerify(query, pending, { role = "admin", label = "Verified" } = {}) {
+  const pressChat = query.message.chat.id;
+  // Follow-up work (manual set-up cards, out-of-stock, Desk errors) always goes to the ADMIN, even when
+  // a supervisor pressed the button. Falls back to the presser if no admin is known.
+  const adminId = (await resolveAdminChatId()) || pressChat;
   const product = await getProductById(pending.productId);
   const type = product ? product.type : "auto";
   const base = {
@@ -1374,7 +1411,7 @@ async function handleVerify(query, pending) {
   const meta = {
     paymentStatus: "Paid",
     payslipSent: "Yes",
-    adminDecision: "Verified",
+    adminDecision: label,
     decisionTime: now(),
   };
 
@@ -1383,7 +1420,7 @@ async function handleVerify(query, pending) {
     if (!inv) {
       // Stop, keep it pending, leave the buttons so admin can retry after restocking.
       return bot.sendMessage(
-        adminId,
+        pressChat,
         `⚠️ Sold out: no available inventory for ${pending.orderId} ` +
           `(${pending.productName} ${pending.variant}). Add stock, then tap Verified again.`
       );
@@ -1395,11 +1432,11 @@ async function handleVerify(query, pending) {
     await deliverManualOrder(base, product, adminId, meta);
   }
 
-  await closeAdminMessage(query, "✅ Verified");
+  await closeAdminMessage(query, `✅ ${label}`);
 }
 
 // No Verify: tell the customer, drop the pending order — nothing is recorded.
-async function handleNoVerify(query, pending) {
+async function handleNoVerify(query, pending, { label = "No Verify" } = {}) {
   pendingOrders.delete(pending.pendingId);
   await bot.sendMessage(
     pending.customerChatId,
@@ -1413,7 +1450,18 @@ async function handleNoVerify(query, pending) {
       },
     }
   );
-  await closeAdminMessage(query, "❌ No Verify");
+  await closeAdminMessage(query, `❌ ${label}`);
+}
+
+/** The payslip card also went to the other approvers. Once someone decides, strip the buttons from
+ *  every other copy and say who decided — so nobody taps a stale button, and the admin sees who
+ *  verified when it was a supervisor. */
+async function closeOtherCopies(pending, query, text) {
+  for (const c of pending.copies || []) {
+    if (String(c.chatId) === String(query.message.chat.id) && c.messageId === query.message.message_id) continue;
+    await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: c.chatId, message_id: c.messageId }).catch(() => {});
+    await bot.sendMessage(c.chatId, text, { reply_to_message_id: c.messageId }).catch(() => {});
+  }
 }
 
 // ─── Customer "contact admin" flows ──────────────────────────────────────────
@@ -1936,6 +1984,22 @@ bot.onText(/^\/rate(?:@\w+)?(?:\s+(\S+))?\s*$/i, async (msg, match) => {
   );
 });
 
+/** /groupid — send it inside a group and the bot replies with that group's id, for SLIP_GROUP_ID.
+ *  Admin only, matched by the sender's own Telegram user id (the chat id is the group's); silent for
+ *  everyone else, so staff in the group see nothing. */
+bot.onText(/^\/groupid(?:@\w+)?\s*$/i, async (msg) => {
+  const adminId = await resolveAdminChatId().catch(() => null);
+  if (groupRoleFor({ fromId: msg.from && msg.from.id, adminId }) !== "admin") return;
+  if (msg.chat.type !== "group" && msg.chat.type !== "supergroup") {
+    return bot.sendMessage(msg.chat.id, "ℹ️ ဒီ command ကို Group ထဲမှာပဲ ရိုက်ပါ။");
+  }
+  return bot.sendMessage(
+    msg.chat.id,
+    `SLIP_GROUP_ID = <code>${esc(String(msg.chat.id))}</code>\n\nRailway Variables ထဲမှာ ဒီနံပါတ်ကို SLIP_GROUP_ID အဖြစ် ထည့်ပါ။`,
+    { parse_mode: "HTML" }
+  );
+});
+
 /** Admin sends the Thai PromptPay QR picture with the caption /setthaiqr.
  *  The bot keeps only Telegram's file id (in Settings), never the picture or your number in code. */
 async function handleSetThaiQr(msg) {
@@ -1976,6 +2040,14 @@ bot.onText(new RegExp(`^${BTN.wallet}$`), async (msg) => {
 // ─── Callback queries (all button taps; callback_data is ID-based) ───────────
 
 bot.on("callback_query", async (query) => {
+  // In the payslip group everyone sees the buttons but only the admin may use them: tell anyone
+  // else so with a pop-up (the one answer a callback allows), and do nothing.
+  if (isSlipGroupChat(query.message && query.message.chat) && /^(verify|noverify|verifyask|verifyback):/.test(query.data || "")) {
+    const gAdmin = await resolveAdminChatId().catch(() => null);
+    if (groupRoleFor({ fromId: query.from && query.from.id, adminId: gAdmin }) !== "admin") {
+      return bot.answerCallbackQuery(query.id, { text: "🔒 Admin only", show_alert: true }).catch(() => {});
+    }
+  }
   await bot.answerCallbackQuery(query.id);
   const chatId = query.message.chat.id;
   const data = query.data || "";
@@ -2010,20 +2082,39 @@ bot.on("callback_query", async (query) => {
         return await handleCancel(query, arg);
       case "verify":
       case "noverify": {
-        const adminId = await resolveAdminChatId();
-        if (!adminId || String(chatId) !== String(adminId)) return; // admin only
+        const role = await orderRole(query);
+        if (!role) return; // not the admin or a supervisor — silent
         const pending = pendingOrders.get(arg);
         if (!pending) {
           return await bot.sendMessage(chatId, "ℹ️ This order was already handled or cancelled.");
         }
-        return action === "verify"
-          ? await handleVerify(query, pending)
-          : await handleNoVerify(query, pending);
+        if (action === "verify" && !canVerify(role, pending.slipLevel)) {
+          return await bot.sendMessage(
+            chatId,
+            "🔒 ဒီ slip ကို Admin ပဲ Verify လုပ်လို့ရပါတယ် (🔴 ဒါမှမဟုတ် slip check verdict မရှိလို့)။ မမှန်ရင် ❌ No Verify နှိပ်ပါ။"
+          );
+        }
+        // Claim it synchronously, so two people tapping at once can't both go through.
+        if (pending.deciding) return await bot.sendMessage(chatId, "⏳ တခြားသူ ဆုံးဖြတ်နေပါပြီ။");
+        pending.deciding = true;
+        const label = decisionLabel(action, role, query.from);
+        try {
+          if (action === "verify") await handleVerify(query, pending, { role, label });
+          else await handleNoVerify(query, pending, { label });
+        } finally {
+          if (pendingOrders.has(pending.pendingId)) pending.deciding = false; // e.g. sold out — retry allowed
+        }
+        if (!pendingOrders.has(pending.pendingId)) {
+          console.log(`Order ${pending.orderId} ${label} · ${role} ${query.from?.id}`);
+          await closeOtherCopies(pending, query, `${action === "verify" ? "✅" : "❌"} ${label} — ${pending.orderId}`);
+        }
+        return;
       }
       case "verifyask":
       case "verifyback": {
-        const adminId = await resolveAdminChatId();
-        if (!adminId || String(chatId) !== String(adminId)) return; // admin only
+        const role = await orderRole(query);
+        if (!role) return; // not the admin or a supervisor — silent
+        if (role !== "admin") return; // the "verify anyway" step on a 🔴 slip is the admin's alone
         const pending = pendingOrders.get(arg);
         if (!pending) {
           return await bot.sendMessage(chatId, "ℹ️ This order was already handled or cancelled.");
@@ -2138,7 +2229,35 @@ bot.on("photo", async (msg) => {
       const contact = customerButtonRow(pending.customerUsername);
       if (contact) rows.push(contact);
 
-      await sendPayslipToAdmin(adminId, msg, caption, rows);
+      pending.copies = [];
+      const first = await sendPayslipToAdmin(adminId, msg, caption, rows);
+      if (first) pending.copies.push({ chatId: first.chat.id, messageId: first.message_id });
+      // Same card to each supervisor. A supervisor who hasn't started the bot (or blocked it) is
+      // skipped; that must never get in the way of the admin's copy or the customer's receipt.
+      for (const sid of supervisorIds) {
+        if (String(sid) === String(adminId)) continue;
+        try {
+          // Where the supervisor may not Verify (🔴 / no verdict) they only get ❌, plus a note why.
+          const mayVerify = canVerify("supervisor", pending.slipLevel);
+          const sRows = mayVerify ? rows : [[{ text: "❌ No Verify", callback_data: `noverify:${pending.orderId}` }], ...(contact ? [contact] : [])];
+          const sCaption = mayVerify ? caption : `${caption}\n\n🔒 <b>Admin ပဲ Verify လုပ်လို့ရပါတယ်</b> (🔴 ဒါမှမဟုတ် slip check verdict မရှိ)။ မမှန်ရင် ❌ ကိုနှိပ်ပါ။`;
+          const sent = await sendPayslipToAdmin(sid, msg, sCaption, sRows);
+          if (sent) pending.copies.push({ chatId: sent.chat.id, messageId: sent.message_id });
+        } catch (e) {
+          console.warn(`could not send the payslip to supervisor ${sid}: ${e.message}`);
+        }
+      }
+      // Copy for the payslip group, if one is set. A failure here (bot not in the group, wrong id)
+      // must never get in the way of the admin's copy or the customer's receipt.
+      if (SLIP_GROUP_ID && String(SLIP_GROUP_ID) !== String(adminId)) {
+        try {
+          const gCaption = `${caption}\n\n🔒 <i>Verify / No Verify ကို Admin ပဲ နှိပ်လို့ရပါတယ်။</i>`;
+          const sent = await sendPayslipToAdmin(SLIP_GROUP_ID, msg, gCaption, rows);
+          if (sent) pending.copies.push({ chatId: sent.chat.id, messageId: sent.message_id });
+        } catch (e) {
+          console.warn(`could not post the payslip to the group ${SLIP_GROUP_ID}: ${e.message}`);
+        }
+      }
     } else {
       console.warn(
         `No admin chat id known; cannot forward payslip for ${pending.orderId}. ` +

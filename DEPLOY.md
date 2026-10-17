@@ -16,6 +16,8 @@ Collect these five values. Everything else follows from them.
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | Already in your local `.env` |
 | `ADMIN_CHAT_ID` | Message **@userinfobot** on Telegram — it replies with your numeric ID |
+| `SUPERVISOR_CHAT_IDS` | *(optional)* Numeric Telegram IDs of supervisors who may Verify / No Verify order payslips, comma-separated. Each presses Start in the bot once. See `.env.example` for the rules |
+| `SLIP_GROUP_ID` | *(optional)* Negative chat id of a staff group (e.g. `-1001234567890`). Order payslip cards are also posted there; only the `ADMIN_CHAT_ID` account can press the buttons. Add the bot to the group first |
 | `GOOGLE_SHEET_ID` | Already in your local `.env` |
 | `GOOGLE_SERVICE_ACCOUNT_EMAIL` | Already in your local `.env` |
 | `GOOGLE_PRIVATE_KEY` | Already in your local `.env` — copy it **exactly**, including the quotes and the `\n` sequences |
